@@ -178,47 +178,42 @@
       }, [rpm]);
 
       // --- THREE.JS INITIALIZATION & SCENE SETUP ---
-      // Fail-safe wrapper (Ray's go-ahead, Nov 22): the 3D init used to fail
-      // silently and leave a blank viewport. Retries a zero-size viewport,
-      // guards renderer/controls creation, and surfaces any error on screen.
+      // Fail-safe wrapper (Ray's go-ahead, Nov 22-23): the 3D init used to
+      // fail silently and leave a blank viewport. Polls until the viewport
+      // has size (10 s cap) with a ResizeObserver trigger, forces a size
+      // and builds instead of giving up, guards renderer/controls
+      // creation, and surfaces any error on screen.
       useEffect(() => {
         if (activeTab !== 'block3d') return;
         const container = canvasContainerRef.current;
         if (!container) return;
 
         let disposed = false;
-        let retryTimer = null;
         let innerCleanup = null;
 
-        const initThree = (attempt) => {
-          if (disposed) return;
-          // Measure with getBoundingClientRect as well as clientWidth/Height.
+        // Reliability (Ray's go-ahead, Nov 23): the old 10 x 150 ms retry
+        // gave up after 1.5 s, before layout settles on a cold first load
+        // (CDN scripts + in-browser Babel transform delay first paint).
+        // Poll until the container has size (10 s cap), watch it with a
+        // ResizeObserver so init fires the moment size appears, and after
+        // the cap FORCE a size and BUILD with it instead of giving up.
+        const POLL_MS = 150;
+        const MAX_WAIT_MS = 10000;
+        const startedAt = Date.now();
+        let pollTimer = null;
+        let sizeObserver = null;
+        let built = false;
+
+        const measure = () => {
           const rect = container.getBoundingClientRect();
-          let width = rect.width || container.clientWidth;
-          let height = rect.height || container.clientHeight;
-          // Zero-size guard: the viewport can measure 0x0 on first paint.
-          // Defer and retry instead of building a dead renderer.
-          if ((width === 0 || height === 0) && attempt < 10) {
-            retryTimer = setTimeout(() => initThree(attempt + 1), 150);
-            return;
-          }
-          if (width === 0 || height === 0) {
-            // Last resort: the flex/h-full height chain can collapse to 0
-            // in the live page. Force an explicit size from the window and
-            // re-measure before giving up, so the renderer always has
-            // somewhere to draw.
-            container.style.height = Math.max(420, window.innerHeight - 62) + 'px';
-            container.style.width = '100%';
-            const forced = container.getBoundingClientRect();
-            width = forced.width || container.clientWidth;
-            height = forced.height || container.clientHeight;
-          }
-          if (width === 0 || height === 0) {
-            const err = new Error('3D viewport measured 0x0 after 10 retries');
-            window.__sbcThreeError = err;
-            setThreeError('3D failed to start: ' + err.message);
-            return;
-          }
+          return {
+            width: rect.width || container.clientWidth,
+            height: rect.height || container.clientHeight
+          };
+        };
+
+        const doBuild = (width, height) => {
+          built = true;
           try {
             setThreeError(null);
             innerCleanup = buildThree(width, height);
@@ -226,6 +221,39 @@
             window.__sbcThreeError = err;
             setThreeError('3D failed to start: ' + err.message);
           }
+        };
+
+        const tryBuild = () => {
+          if (disposed || built) return false;
+          const { width, height } = measure();
+          if (width === 0 || height === 0) return false;
+          doBuild(width, height);
+          return true;
+        };
+
+        const forceBuild = () => {
+          if (disposed || built) return;
+          // Last resort: force an explicit size from the window and BUILD
+          // with it. Never give up with a 0x0 error while the container
+          // exists in the DOM — a renderer built at the forced size will
+          // draw as soon as layout settles.
+          container.style.height = Math.max(420, window.innerHeight - 62) + 'px';
+          container.style.width = '100%';
+          const { width, height } = measure();
+          doBuild(
+            width || container.clientWidth || window.innerWidth,
+            height || container.clientHeight || Math.max(420, window.innerHeight - 62)
+          );
+        };
+
+        const poll = () => {
+          if (disposed || built) return;
+          if (tryBuild()) return;
+          if (Date.now() - startedAt >= MAX_WAIT_MS) {
+            forceBuild();
+            return;
+          }
+          pollTimer = setTimeout(poll, POLL_MS);
         };
 
         const buildThree = (width, height) => {
@@ -725,10 +753,19 @@
         };
         };
 
-        initThree(0);
+        // ResizeObserver: build the moment the container gains size, and
+        // keep polling as a backstop (observer may not fire everywhere).
+        if (typeof ResizeObserver === 'function') {
+          sizeObserver = new ResizeObserver(() => {
+            if (!disposed && !built) tryBuild();
+          });
+          sizeObserver.observe(container);
+        }
+        poll();
         return () => {
           disposed = true;
-          if (retryTimer) clearTimeout(retryTimer);
+          if (pollTimer) clearTimeout(pollTimer);
+          if (sizeObserver) sizeObserver.disconnect();
           if (innerCleanup) innerCleanup();
         };
       }, [activeTab, viewMode]);
@@ -935,8 +972,10 @@
                   </div>
                 )}
 
-                {/* FLOATING TOP-LEFT VIEW CONTROLS */}
-                <div className="absolute top-4 left-4 z-10 flex flex-wrap gap-2">
+                {/* FLOATING TOP-LEFT VIEW CONTROLS — z-30 so they always sit
+                    above the error banner (z-20) and stay clickable even in
+                    a failed state, including when the row wraps on mobile */}
+                <div className="absolute top-4 left-4 z-30 flex flex-wrap gap-2">
                   <div className="bg-chevyPanel/90 backdrop-blur border border-gray-700 p-1.5 rounded-lg flex space-x-1 shadow-xl">
                     <button
                       onClick={() => setViewMode('realistic')}
@@ -990,8 +1029,8 @@
                   </button>
                 </div>
 
-                {/* FLOATING BOTTOM CONTROLS HUD */}
-                <div className="absolute bottom-6 left-6 right-6 md:right-auto md:w-96 z-10 bg-chevyPanel/95 backdrop-blur border border-gray-700 rounded-xl p-4 shadow-2xl space-y-3">
+                {/* FLOATING BOTTOM CONTROLS HUD — z-30, above the error banner */}
+                <div className="absolute bottom-6 left-6 right-6 md:right-auto md:w-96 z-30 bg-chevyPanel/95 backdrop-blur border border-gray-700 rounded-xl p-4 shadow-2xl space-y-3">
                   <div className="flex items-center justify-between border-b border-gray-700 pb-2">
                     <span className="text-xs font-bold tracking-wider text-gray-300">EXPLODED VIEW DISASSEMBLY</span>
                     <span className="text-xs font-mono text-chevyOrange font-bold">{Math.round(explodedAmount * 100)}%</span>
@@ -1030,9 +1069,9 @@
                   </p>
                 </div>
 
-                {/* FLOATING RIGHT INSPECTOR PANEL (CLICKABLE PART HUD) */}
+                {/* FLOATING RIGHT INSPECTOR PANEL (CLICKABLE PART HUD) — z-30 */}
                 {selectedPart && (
-                  <div className="absolute top-4 right-4 z-10 w-80 bg-chevyPanel/95 backdrop-blur border border-chevyOrange/60 rounded-xl p-4 shadow-2xl animate-fade-in">
+                  <div className="absolute top-4 right-4 z-30 w-80 bg-chevyPanel/95 backdrop-blur border border-chevyOrange/60 rounded-xl p-4 shadow-2xl animate-fade-in">
                     <div className="flex items-start justify-between">
                       <span className="text-[10px] font-mono uppercase tracking-wider text-chevyOrange font-bold">COMPONENT INSPECTOR</span>
                       <button onClick={() => setSelectedPart(null)} className="text-gray-400 hover:text-white text-xs font-bold">✕</button>
