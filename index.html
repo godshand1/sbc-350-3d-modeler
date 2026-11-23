@@ -192,13 +192,26 @@
 
         const initThree = (attempt) => {
           if (disposed) return;
-          const width = container.clientWidth;
-          const height = container.clientHeight;
+          // Measure with getBoundingClientRect as well as clientWidth/Height.
+          const rect = container.getBoundingClientRect();
+          let width = rect.width || container.clientWidth;
+          let height = rect.height || container.clientHeight;
           // Zero-size guard: the viewport can measure 0x0 on first paint.
           // Defer and retry instead of building a dead renderer.
           if ((width === 0 || height === 0) && attempt < 10) {
             retryTimer = setTimeout(() => initThree(attempt + 1), 150);
             return;
+          }
+          if (width === 0 || height === 0) {
+            // Last resort: the flex/h-full height chain can collapse to 0
+            // in the live page. Force an explicit size from the window and
+            // re-measure before giving up, so the renderer always has
+            // somewhere to draw.
+            container.style.height = Math.max(420, window.innerHeight - 62) + 'px';
+            container.style.width = '100%';
+            const forced = container.getBoundingClientRect();
+            width = forced.width || container.clientWidth;
+            height = forced.height || container.clientHeight;
           }
           if (width === 0 || height === 0) {
             const err = new Error('3D viewport measured 0x0 after 10 retries');
@@ -905,17 +918,19 @@
             
             {/* TAB 1: 3D ENGINE BLOCK (INTERACTIVE THREE.JS VIEWPORT) */}
             {activeTab === 'block3d' && (
-              <div className="flex-1 flex flex-col md:flex-row relative h-[calc(100vh-62px)]">
+              <div className="flex flex-col md:flex-row relative h-[calc(100vh-62px)]" style={{ height: 'calc(100vh - 62px)', minHeight: '480px' }}>
                 {/* 3D WebGL Canvas */}
-                <div ref={canvasContainerRef} className="flex-1 relative w-full h-full cursor-grab active:cursor-grabbing blueprint-grid" />
+                <div ref={canvasContainerRef} className="flex-1 relative w-full h-full cursor-grab active:cursor-grabbing blueprint-grid" style={{ width: '100%', height: '100%' }} />
 
-                {/* 3D ERROR OVERLAY — shown instead of a silent blank viewport */}
+                {/* 3D ERROR BANNER — compact, dismissible, never covers the controls */}
                 {threeError && (
-                  <div className="absolute inset-0 z-20 flex items-center justify-center bg-chevyDark/90 p-6">
-                    <div className="max-w-md w-full bg-chevyPanel border border-red-500/70 rounded-xl p-5 shadow-2xl">
-                      <p className="text-sm font-bold text-red-400">3D VIEW COULD NOT START</p>
-                      <p className="mt-2 text-xs text-gray-300 break-words">{threeError}</p>
-                      <p className="mt-3 text-[11px] text-gray-500">The rest of the app still works — tabs, transmission, dyno and schematics are unaffected. Please tell Phoenix the message above so she can fix it.</p>
+                  <div className="absolute inset-x-0 top-16 z-20 flex justify-center pointer-events-none px-4">
+                    <div className="pointer-events-auto max-w-md w-full bg-chevyPanel border border-red-500/70 rounded-xl px-4 py-3 shadow-2xl flex items-start gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-bold text-red-400">3D VIEW COULD NOT START</p>
+                        <p className="mt-1 text-xs text-gray-300 break-words">{threeError}</p>
+                      </div>
+                      <button onClick={() => setThreeError(null)} className="shrink-0 text-gray-400 hover:text-white text-sm font-bold leading-none px-1" title="Dismiss">✕</button>
                     </div>
                   </div>
                 )}
