@@ -142,6 +142,7 @@
       const [isRunning, setIsRunning] = useState(false);
       const [isAudioOn, setIsAudioOn] = useState(false);
       const [selectedPart, setSelectedPart] = useState(null);
+      const [threeError, setThreeError] = useState(null); // Fail-safe: surfaces 3D init/render errors on screen
 
       // Dyno & Configuration State
       const [camProfile, setCamProfile] = useState('street'); 
@@ -177,13 +178,44 @@
       }, [rpm]);
 
       // --- THREE.JS INITIALIZATION & SCENE SETUP ---
+      // Fail-safe wrapper (Ray's go-ahead, Nov 22): the 3D init used to fail
+      // silently and leave a blank viewport. Retries a zero-size viewport,
+      // guards renderer/controls creation, and surfaces any error on screen.
       useEffect(() => {
         if (activeTab !== 'block3d') return;
         const container = canvasContainerRef.current;
         if (!container) return;
 
-        const width = container.clientWidth;
-        const height = container.clientHeight;
+        let disposed = false;
+        let retryTimer = null;
+        let innerCleanup = null;
+
+        const initThree = (attempt) => {
+          if (disposed) return;
+          const width = container.clientWidth;
+          const height = container.clientHeight;
+          // Zero-size guard: the viewport can measure 0x0 on first paint.
+          // Defer and retry instead of building a dead renderer.
+          if ((width === 0 || height === 0) && attempt < 10) {
+            retryTimer = setTimeout(() => initThree(attempt + 1), 150);
+            return;
+          }
+          if (width === 0 || height === 0) {
+            const err = new Error('3D viewport measured 0x0 after 10 retries');
+            window.__sbcThreeError = err;
+            setThreeError('3D failed to start: ' + err.message);
+            return;
+          }
+          try {
+            setThreeError(null);
+            innerCleanup = buildThree(width, height);
+          } catch (err) {
+            window.__sbcThreeError = err;
+            setThreeError('3D failed to start: ' + err.message);
+          }
+        };
+
+        const buildThree = (width, height) => {
 
         // Scene
         const scene = new THREE.Scene();
@@ -204,8 +236,19 @@
         camera.lookAt(0, 0, 0);
         cameraRef.current = camera;
 
-        // Renderer
-        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        // Renderer (fail-safe: retry once without antialias/alpha if creation throws)
+        let renderer;
+        try {
+          renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        } catch (err) {
+          try {
+            renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false });
+          } catch (err2) {
+            window.__sbcThreeError = err2;
+            setThreeError('3D failed to start: ' + err2.message);
+            return;
+          }
+        }
         renderer.setSize(width, height);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.shadowMap.enabled = viewMode === 'realistic';
@@ -214,13 +257,17 @@
         container.appendChild(renderer.domElement);
         rendererRef.current = renderer;
 
-        // Controls
-        const controls = new THREE.OrbitControls(camera, renderer.domElement);
-        controls.enableDamping = true;
-        controls.dampingFactor = 0.05;
-        controls.maxDistance = 60;
-        controls.minDistance = 3;
-        controlsRef.current = controls;
+        // Controls (guard: the scene must still render if OrbitControls never loaded)
+        const controls = (typeof THREE.OrbitControls === 'function')
+          ? new THREE.OrbitControls(camera, renderer.domElement)
+          : null;
+        if (controls) {
+          controls.enableDamping = true;
+          controls.dampingFactor = 0.05;
+          controls.maxDistance = 60;
+          controls.minDistance = 3;
+          controlsRef.current = controls;
+        }
 
         // Lighting
         const ambientLight = new THREE.AmbientLight(0xffffff, viewMode === 'technical' ? 0.9 : 0.6);
@@ -593,6 +640,7 @@
         renderer.domElement.addEventListener('click', onCanvasClick);
 
         // --- ANIMATION LOOP ---
+        let renderFailed = false;
         let lastTime = performance.now();
         const animate = (now) => {
           animFrameIdRef.current = requestAnimationFrame(animate);
@@ -626,7 +674,17 @@
             });
           }
 
-          renderer.render(scene, camera);
+          try {
+            renderer.render(scene, camera);
+          } catch (err) {
+            if (!renderFailed) {
+              renderFailed = true;
+              window.__sbcThreeError = err;
+              setThreeError('3D render failed: ' + err.message);
+            }
+            if (animFrameIdRef.current) cancelAnimationFrame(animFrameIdRef.current);
+            return;
+          }
         };
         animFrameIdRef.current = requestAnimationFrame(animate);
 
@@ -651,6 +709,14 @@
             renderer.domElement.parentNode.removeChild(renderer.domElement);
           }
           renderer.dispose();
+        };
+        };
+
+        initThree(0);
+        return () => {
+          disposed = true;
+          if (retryTimer) clearTimeout(retryTimer);
+          if (innerCleanup) innerCleanup();
         };
       }, [activeTab, viewMode]);
 
@@ -842,6 +908,17 @@
               <div className="flex-1 flex flex-col md:flex-row relative h-[calc(100vh-62px)]">
                 {/* 3D WebGL Canvas */}
                 <div ref={canvasContainerRef} className="flex-1 relative w-full h-full cursor-grab active:cursor-grabbing blueprint-grid" />
+
+                {/* 3D ERROR OVERLAY — shown instead of a silent blank viewport */}
+                {threeError && (
+                  <div className="absolute inset-0 z-20 flex items-center justify-center bg-chevyDark/90 p-6">
+                    <div className="max-w-md w-full bg-chevyPanel border border-red-500/70 rounded-xl p-5 shadow-2xl">
+                      <p className="text-sm font-bold text-red-400">3D VIEW COULD NOT START</p>
+                      <p className="mt-2 text-xs text-gray-300 break-words">{threeError}</p>
+                      <p className="mt-3 text-[11px] text-gray-500">The rest of the app still works — tabs, transmission, dyno and schematics are unaffected. Please tell Phoenix the message above so she can fix it.</p>
+                    </div>
+                  </div>
+                )}
 
                 {/* FLOATING TOP-LEFT VIEW CONTROLS */}
                 <div className="absolute top-4 left-4 z-10 flex flex-wrap gap-2">
