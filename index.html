@@ -1,0 +1,1499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chevy SBC 350 3D Engine Modeler | Ray's Account</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            chevyOrange: '#d83b01',
+            chevyDark: '#1a1d20',
+            chevyPanel: '#24292e',
+            chevyGold: '#e5a823',
+            cadCyan: '#00f0ff'
+          }
+        }
+      }
+    };
+  </script>
+
+  <!-- React 18 and Babel Standalone for in-browser execution -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Three.js + OrbitControls -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+  <style>
+    body { margin: 0; background-color: #0e1114; overflow-x: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    canvas { outline: none; }
+    .blueprint-grid {
+      background-size: 24px 24px;
+      background-image: 
+        linear-gradient(to right, rgba(0, 240, 255, 0.08) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(0, 240, 255, 0.08) 1px, transparent 1px);
+    }
+    /* Custom scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #1a1d20; }
+    ::-webkit-scrollbar-thumb { background: #3b4249; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #d83b01; }
+  </style>
+</head>
+<body class="text-gray-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo } = React;
+
+    // --- BASELINE ENGINEERING CONSTANTS (RAY'S SPECS) ---
+    const ENGINE_SPECS = {
+      name: "Gen-1 Chevrolet Small-Block 350 (V8)",
+      displacementCi: 350.4,
+      displacementL: 5.74,
+      bore: 4.000,           // in
+      stroke: 3.480,         // in
+      rodLength: 5.700,      // in (Ray's baseline)
+      deckHeight: 9.025,     // in (Ray's baseline)
+      chamberCc: 64.0,       // cc (Ray's baseline)
+      gasketThickness: 0.039,// in (Ray's baseline)
+      deckClearance: 0.015,  // in (Ray's baseline)
+      pistonDishCc: 5.0,     // 4-eyebrow flat top standard
+      quenchDistance: 0.054, // 0.039 + 0.015 = 0.054"
+      staticCR: 9.90,        // Computed Static Compression Ratio
+      firingOrder: "1-8-4-3-6-5-7-2"
+    };
+
+    // --- AUDIO SYNTHESIZER (V8 RUMBLE) ---
+    class V8AudioEngine {
+      constructor() {
+        this.ctx = null;
+        this.osc1 = null;
+        this.osc2 = null;
+        this.gainNode = null;
+        this.filter = null;
+        this.isPlaying = false;
+      }
+      init() {
+        if (this.ctx) return;
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        this.ctx = new AudioContext();
+
+        this.osc1 = this.ctx.createOscillator();
+        this.osc2 = this.ctx.createOscillator();
+        this.gainNode = this.ctx.createGain();
+        this.filter = this.ctx.createBiquadFilter();
+
+        this.osc1.type = 'sawtooth';
+        this.osc2.type = 'triangle';
+
+        this.filter.type = 'lowpass';
+        this.filter.frequency.setValueAtTime(220, this.ctx.currentTime);
+
+        this.gainNode.gain.setValueAtTime(0.001, this.ctx.currentTime);
+
+        this.osc1.connect(this.filter);
+        this.osc2.connect(this.filter);
+        this.filter.connect(this.gainNode);
+        this.gainNode.connect(this.ctx.destination);
+
+        this.osc1.start();
+        this.osc2.start();
+      }
+      setRPM(rpm) {
+        if (!this.ctx || !this.isPlaying) return;
+        // SBC V8 has 4 ignition pulses per crank revolution
+        const baseFreq = (rpm / 60) * 2.0; 
+        const now = this.ctx.currentTime;
+        this.osc1.frequency.setTargetAtTime(Math.max(25, baseFreq * 1.5), now, 0.05);
+        this.osc2.frequency.setTargetAtTime(Math.max(15, baseFreq * 0.75), now, 0.05);
+        this.filter.frequency.setTargetAtTime(Math.min(2200, 160 + rpm * 0.28), now, 0.05);
+      }
+      start(rpm) {
+        this.init();
+        if (this.ctx.state === 'suspended') this.ctx.resume();
+        this.isPlaying = true;
+        this.gainNode.gain.setTargetAtTime(0.12, this.ctx.currentTime, 0.1);
+        this.setRPM(rpm);
+      }
+      stop() {
+        if (!this.ctx || !this.isPlaying) return;
+        this.gainNode.gain.setTargetAtTime(0.0001, this.ctx.currentTime, 0.1);
+        this.isPlaying = false;
+      }
+    }
+    const audioEngine = new V8AudioEngine();
+
+    // --- MAIN REACT APPLICATION COMPONENT ---
+    function SBC350App() {
+      const [activeTab, setActiveTab] = useState('block3d');
+      const [viewMode, setViewMode] = useState('realistic'); // 'realistic' | 'isometric' | 'technical'
+      const [explodedAmount, setExplodedAmount] = useState(0); // 0 to 1
+      const [rpm, setRpm] = useState(850);
+      const [isRunning, setIsRunning] = useState(false);
+      const [isAudioOn, setIsAudioOn] = useState(false);
+      const [selectedPart, setSelectedPart] = useState(null);
+
+      // Dyno & Configuration State
+      const [camProfile, setCamProfile] = useState('street'); 
+      const [carbCfm, setCarbCfm] = useState(650);
+      const [intakeType, setIntakeType] = useState('dualplane');
+      const [selectedTrans, setSelectedTrans] = useState('th350');
+      const [rearGear, setRearGear] = useState(3.73);
+      const [tireDiameter, setTireDiameter] = useState(26.0);
+      const [selectedVehicle, setSelectedVehicle] = useState('chevelle1970');
+
+      const canvasContainerRef = useRef(null);
+      const sceneRef = useRef(null);
+      const rendererRef = useRef(null);
+      const cameraRef = useRef(null);
+      const controlsRef = useRef(null);
+      const enginePartsRef = useRef({});
+      const animFrameIdRef = useRef(null);
+      const crankAngleRef = useRef(0);
+
+      // Handle Engine Audio
+      useEffect(() => {
+        if (isRunning && isAudioOn) {
+          audioEngine.start(rpm);
+        } else {
+          audioEngine.stop();
+        }
+      }, [isRunning, isAudioOn]);
+
+      useEffect(() => {
+        if (isRunning && isAudioOn) {
+          audioEngine.setRPM(rpm);
+        }
+      }, [rpm]);
+
+      // --- THREE.JS INITIALIZATION & SCENE SETUP ---
+      useEffect(() => {
+        if (activeTab !== 'block3d') return;
+        const container = canvasContainerRef.current;
+        if (!container) return;
+
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+
+        // Scene
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(viewMode === 'technical' ? 0x07111a : 0x14181c);
+        sceneRef.current = scene;
+
+        // Camera
+        let camera;
+        if (viewMode === 'isometric') {
+          const aspect = width / height;
+          const d = 14;
+          camera = new THREE.OrthographicCamera(-d * aspect, d * aspect, d, -d, 1, 1000);
+          camera.position.set(20, 20, 20);
+        } else {
+          camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+          camera.position.set(16, 12, 22);
+        }
+        camera.lookAt(0, 0, 0);
+        cameraRef.current = camera;
+
+        // Renderer
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(width, height);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.shadowMap.enabled = viewMode === 'realistic';
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        container.innerHTML = '';
+        container.appendChild(renderer.domElement);
+        rendererRef.current = renderer;
+
+        // Controls
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.maxDistance = 60;
+        controls.minDistance = 3;
+        controlsRef.current = controls;
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, viewMode === 'technical' ? 0.9 : 0.6);
+        scene.add(ambientLight);
+
+        const dirLight1 = new THREE.DirectionalLight(0xffffff, viewMode === 'technical' ? 0.4 : 1.2);
+        dirLight1.position.set(15, 25, 15);
+        dirLight1.castShadow = viewMode === 'realistic';
+        scene.add(dirLight1);
+
+        const dirLight2 = new THREE.DirectionalLight(0x7090ff, 0.4);
+        dirLight2.position.set(-15, -10, -15);
+        scene.add(dirLight2);
+
+        // Ground Blueprint Grid
+        const gridHelper = new THREE.GridHelper(30, 30, 0x00f0ff, 0x223344);
+        gridHelper.position.y = -6;
+        scene.add(gridHelper);
+
+        // --- MATERIALS MATRIX ---
+        const isTech = viewMode === 'technical';
+        const materials = {
+          block: new THREE.MeshStandardMaterial({
+            color: isTech ? 0x00f0ff : 0xd83b01, // Chevy Orange
+            roughness: isTech ? 0.8 : 0.5,
+            metalness: isTech ? 0.1 : 0.2,
+            wireframe: isTech
+          }),
+          aluminumHead: new THREE.MeshStandardMaterial({
+            color: isTech ? 0x66ccff : 0xc0c8d0,
+            roughness: 0.35,
+            metalness: 0.65,
+            wireframe: isTech
+          }),
+          crankshaft: new THREE.MeshStandardMaterial({
+            color: isTech ? 0x00e5ff : 0x8a939e,
+            roughness: 0.25,
+            metalness: 0.85,
+            wireframe: isTech
+          }),
+          pistons: new THREE.MeshStandardMaterial({
+            color: isTech ? 0x38bdf8 : 0xdde2e6,
+            roughness: 0.2,
+            metalness: 0.8,
+            wireframe: isTech
+          }),
+          intake: new THREE.MeshStandardMaterial({
+            color: isTech ? 0x00f0ff : 0xb8c0c8,
+            roughness: 0.4,
+            metalness: 0.5,
+            wireframe: isTech
+          }),
+          carb: new THREE.MeshStandardMaterial({
+            color: isTech ? 0x93c5fd : 0xd4af37, // Zinc dichromate / Gold Holley
+            roughness: 0.3,
+            metalness: 0.6,
+            wireframe: isTech
+          }),
+          headers: new THREE.MeshStandardMaterial({
+            color: isTech ? 0x38bdf8 : 0x2e343b,
+            roughness: 0.6,
+            metalness: 0.5,
+            wireframe: isTech
+          }),
+          oilPan: new THREE.MeshStandardMaterial({
+            color: isTech ? 0x00f0ff : 0x111111,
+            roughness: 0.4,
+            metalness: 0.7,
+            wireframe: isTech
+          }),
+          chrome: new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            roughness: 0.1,
+            metalness: 0.95
+          })
+        };
+
+        // --- BUILD 3D SBC 350 ENGINE ASSEMBLY ---
+        const engineGroup = new THREE.Group();
+        const parts = {};
+
+        // 1. ENGINE BLOCK (Cast Iron, 90° V-bank)
+        const blockGroup = new THREE.Group();
+        blockGroup.name = "Engine Block (350ci - 4.000\" Bore)";
+        blockGroup.userData = {
+          name: "Gen-1 SBC 350 Cylinder Block",
+          desc: "90-degree V8 cast-iron block with 4.000-inch bore cylinders, 9.025-inch deck height, 2-piece / 1-piece rear main seal tunnel.",
+          specs: "Bore: 4.000\" | Deck: 9.025\" | Main Journal Dia: 2.45\" | Cam Tunnel: 2.000\"",
+          torque: "Main Caps: 70 ft-lbs (inner), 65 ft-lbs (outer 4-bolt)"
+        };
+
+        // Lower crankcase core
+        const crankcaseGeo = new THREE.BoxGeometry(6.4, 3.8, 12);
+        const crankcaseMesh = new THREE.Mesh(crankcaseGeo, materials.block);
+        crankcaseMesh.position.y = -0.5;
+        blockGroup.add(crankcaseMesh);
+
+        // Bank Left (-45 deg) & Bank Right (+45 deg)
+        [-1, 1].forEach((side) => {
+          const bankGroup = new THREE.Group();
+          bankGroup.position.set(side * 2.1, 1.2, side === 1 ? -0.2 : 0.2); // Cyl staggered forward
+          bankGroup.rotation.z = side * (-Math.PI / 4);
+
+          const deckGeo = new THREE.BoxGeometry(4.4, 2.8, 11.8);
+          const deckMesh = new THREE.Mesh(deckGeo, materials.block);
+          bankGroup.add(deckMesh);
+
+          // 4 Cylinder Bores per bank
+          for (let i = 0; i < 4; i++) {
+            const boreGeo = new THREE.CylinderGeometry(1.2, 1.2, 3.0, 24);
+            const boreMat = new THREE.MeshBasicMaterial({ color: 0x050505, wireframe: isTech });
+            const boreMesh = new THREE.Mesh(boreGeo, boreMat);
+            boreMesh.position.set(0, 0, -4.5 + i * 3.0);
+            bankGroup.add(boreMesh);
+          }
+          blockGroup.add(bankGroup);
+        });
+        engineGroup.add(blockGroup);
+        parts.block = blockGroup;
+
+        // 2. CRANKSHAFT (Forged Steel 3.480" Stroke)
+        const crankGroup = new THREE.Group();
+        crankGroup.name = "Crankshaft (3.480\" Stroke)";
+        crankGroup.userData = {
+          name: "Forged Steel Crankshaft",
+          desc: "Large journal 3.480\" stroke crank with dual counterweights, 2.45\" mains, and 2.10\" rod journals.",
+          specs: "Stroke: 3.480\" | Main Journal: 2.449\" | Rod Journal: 2.100\" | Radius: 1.740\"",
+          torque: "Flywheel: 60 ft-lbs | Damper: 60 ft-lbs"
+        };
+        const mainSnout = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.7, 13.5, 24), materials.crankshaft);
+        mainSnout.rotation.x = Math.PI / 2;
+        mainSnout.position.y = -1.0;
+        crankGroup.add(mainSnout);
+
+        // Counterweights
+        for (let j = 0; j < 5; j++) {
+          const cwGeo = new THREE.CylinderGeometry(1.8, 1.8, 0.5, 16, 1, false, 0, Math.PI);
+          const cwMesh = new THREE.Mesh(cwGeo, materials.crankshaft);
+          cwMesh.rotation.z = (j % 2 === 0 ? 0 : Math.PI);
+          cwMesh.rotation.x = Math.PI / 2;
+          cwMesh.position.set(0, -1.0, -5.2 + j * 2.6);
+          crankGroup.add(cwMesh);
+        }
+        engineGroup.add(crankGroup);
+        parts.crank = crankGroup;
+
+        // 3. PISTONS & 5.700" CONNECTING RODS
+        const rotatingAssemblyGroup = new THREE.Group();
+        rotatingAssemblyGroup.name = "Pistons & 5.700\" Rods";
+        rotatingAssemblyGroup.userData = {
+          name: "Pistons & Rods (Ray's Spec: 5.700\" Rod Length)",
+          desc: "Forged H-beam 5.700-inch rods paired to 4.000-inch forged flat-top pistons with 4-valve reliefs.",
+          specs: "Rod: 5.700\" C-to-C | Piston: 4.000\" | Deck Clearance: 0.015\" | Pin: 0.927\"",
+          torque: "Rod Cap Bolts (3/8\" ARP): 45 ft-lbs with moly lube"
+        };
+
+        const pistonNodes = [];
+        const crankRadius = 3.480 * 0.35; // Model scaled
+        const rodLength = 5.700 * 0.35;   // Model scaled
+
+        for (let p = 0; p < 8; p++) {
+          const isRight = p % 2 === 0;
+          const bankAngle = isRight ? Math.PI / 4 : -Math.PI / 4;
+          const bankSign = isRight ? 1 : -1;
+          const cylIndex = Math.floor(p / 2);
+
+          const pGroup = new THREE.Group();
+          pGroup.position.set(bankSign * 1.8, 1.2, -4.5 + cylIndex * 3.0 + (isRight ? -0.2 : 0.2));
+          pGroup.rotation.z = -bankAngle;
+
+          // Piston Crown & Skirt
+          const pistonCrown = new THREE.Mesh(new THREE.CylinderGeometry(1.15, 1.15, 1.1, 24), materials.pistons);
+          pistonCrown.position.y = 1.6;
+          pGroup.add(pistonCrown);
+
+          // Connecting Rod
+          const rodMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.35, rodLength, 12), materials.crankshaft);
+          rodMesh.position.y = 0.3;
+          pGroup.add(rodMesh);
+
+          rotatingAssemblyGroup.add(pGroup);
+          pistonNodes.push({
+            group: pGroup,
+            angleOffset: (p * Math.PI) / 4,
+            baseY: 1.2,
+            bankSign
+          });
+        }
+        engineGroup.add(rotatingAssemblyGroup);
+        parts.rotatingAssembly = rotatingAssemblyGroup;
+
+        // 4. CYLINDER HEADS (64cc Combustion Chambers)
+        const headsGroup = new THREE.Group();
+        headsGroup.name = "Cylinder Heads (64cc Chambers)";
+        headsGroup.userData = {
+          name: "64cc Combustion Chamber Heads",
+          desc: "High-velocity intake ports, 2.02\" intake / 1.60\" exhaust valves, straight spark plug orientation.",
+          specs: "Chamber: 64cc | Intake Port: 195cc | Valves: 2.02\" / 1.60\" | Gasket: 0.039\" compressed",
+          torque: "Head Bolts (7/16-14): 65 ft-lbs in 3 steps (25, 45, 65 ft-lbs)"
+        };
+        [-1, 1].forEach((side) => {
+          const headMeshGroup = new THREE.Group();
+          headMeshGroup.position.set(side * 3.8, 3.2, 0);
+          headMeshGroup.rotation.z = side * (-Math.PI / 4);
+
+          const headGeo = new THREE.BoxGeometry(3.6, 2.6, 12.2);
+          const headMesh = new THREE.Mesh(headGeo, materials.aluminumHead);
+          headMeshGroup.add(headMesh);
+
+          // Valve Cover
+          const vcGeo = new THREE.BoxGeometry(2.8, 1.6, 11.6);
+          const vcMesh = new THREE.Mesh(vcGeo, materials.chrome);
+          vcMesh.position.y = 2.0;
+          headMeshGroup.add(vcMesh);
+
+          headsGroup.add(headMeshGroup);
+        });
+        engineGroup.add(headsGroup);
+        parts.heads = headsGroup;
+
+        // 5. INTAKE MANIFOLD (Dual-Plane High-Rise)
+        const intakeGroup = new THREE.Group();
+        intakeGroup.name = "Dual-Plane Intake Manifold";
+        intakeGroup.userData = {
+          name: "Aluminum Dual-Plane High-Rise Intake",
+          desc: "Dual-plane 180° firing intake manifold designed for broad street/strip torque from 1,500 to 6,200 RPM.",
+          specs: "Carb Flange: Square-bore 4150 | Runner Volume: 190cc | Height: 4.85\"",
+          torque: "Intake Manifold Bolts (3/8-16): 25-30 ft-lbs (tighten center outward)"
+        };
+        const intakeValleyMesh = new THREE.Mesh(new THREE.BoxGeometry(4.2, 2.0, 9.6), materials.intake);
+        intakeValleyMesh.position.set(0, 3.4, 0);
+        intakeGroup.add(intakeValleyMesh);
+
+        const plenumRiser = new THREE.Mesh(new THREE.CylinderGeometry(2.0, 2.3, 1.4, 16), materials.intake);
+        plenumRiser.position.set(0, 4.6, 0);
+        intakeGroup.add(plenumRiser);
+        engineGroup.add(intakeGroup);
+        parts.intake = intakeGroup;
+
+        // 6. CARBURETOR & CHROME AIR CLEANER
+        const carbGroup = new THREE.Group();
+        carbGroup.name = "Carburetor & Air Cleaner";
+        carbGroup.userData = {
+          name: "4-Barrel Carburetor (650 CFM)",
+          desc: "Mechanical secondaries, dual metering blocks, dual fuel bowls, down-leg boosters.",
+          specs: "CFM: 650 CFM | Primary Jets: #68 | Secondary Jets: #76 | Power Valve: 6.5\"",
+          torque: "Carb Mounting Studs (5/16-24): 60-80 in-lbs (do not over-tighten!)"
+        };
+        // Main body
+        const carbBody = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.5, 2.8), materials.carb);
+        carbBody.position.set(0, 5.8, 0);
+        carbGroup.add(carbBody);
+
+        // Dual float bowls
+        [-1.6, 1.6].forEach((zOff) => {
+          const bowl = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.1, 0.9), materials.carb);
+          bowl.position.set(0, 5.7, zOff);
+          carbGroup.add(bowl);
+        });
+
+        // 14" Round Chrome Air Cleaner
+        const airFilter = new THREE.Mesh(new THREE.CylinderGeometry(3.6, 3.6, 1.4, 32), materials.chrome);
+        airFilter.position.set(0, 7.0, 0);
+        carbGroup.add(airFilter);
+
+        const wingNut = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.6, 12), materials.carb);
+        wingNut.position.set(0, 7.8, 0);
+        carbGroup.add(wingNut);
+
+        engineGroup.add(carbGroup);
+        parts.carb = carbGroup;
+
+        // 7. EXHAUST HEADERS (Tubular 4-into-1 Long-Tubes)
+        const headersGroup = new THREE.Group();
+        headersGroup.name = "Tubular Exhaust Headers";
+        headersGroup.userData = {
+          name: "1-5/8\" Long-Tube Headers",
+          desc: "Mandrel bent equal-length primary tubes merging into 3-inch collectors for scavenging efficiency.",
+          specs: "Primary Tube OD: 1.625\" | Collector Dia: 3.00\" | Flange: 3/8\" laser cut",
+          torque: "Header Bolts (3/8-16): 20 ft-lbs (check after heat cycles)"
+        };
+        [-1, 1].forEach((side) => {
+          const sideHeaderGroup = new THREE.Group();
+          sideHeaderGroup.position.set(side * 4.6, 1.0, 0);
+
+          // 4 Swept tubes
+          for (let k = 0; k < 4; k++) {
+            const tubeCurve = new THREE.CubicBezierCurve3(
+              new THREE.Vector3(0, 1.5, -4.5 + k * 3.0),
+              new THREE.Vector3(side * 1.5, 0.8, -4.0 + k * 2.8),
+              new THREE.Vector3(side * 1.2, -1.8, -2.0 + k * 1.0),
+              new THREE.Vector3(side * 0.8, -3.2, 2.0)
+            );
+            const tubeGeo = new THREE.TubeGeometry(tubeCurve, 16, 0.35, 8, false);
+            const tubeMesh = new THREE.Mesh(tubeGeo, materials.headers);
+            sideHeaderGroup.add(tubeMesh);
+          }
+          // Collector
+          const collector = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 1.0, 2.5, 16), materials.headers);
+          collector.rotation.x = Math.PI / 2;
+          collector.position.set(side * 0.8, -3.2, 3.2);
+          sideHeaderGroup.add(collector);
+
+          headersGroup.add(sideHeaderGroup);
+        });
+        engineGroup.add(headersGroup);
+        parts.headers = headersGroup;
+
+        // 8. OIL PAN & ACCESSORIES
+        const oilPanGroup = new THREE.Group();
+        oilPanGroup.name = "Baffled 5-Quart Oil Pan";
+        oilPanGroup.userData = {
+          name: "Deep Sump Stamped Steel Pan",
+          desc: "Internal windage tray with crank scraper and trap-door baffling to prevent high-RPM oil starvation.",
+          specs: "Capacity: 5 Quarts + Filter | Sump Depth: 8.25\" | Drain Plug: 1/2-20",
+          torque: "Oil Pan Bolts (1/4-20): 8 ft-lbs (100 in-lbs) | Corner Bolts (5/16-18): 12 ft-lbs"
+        };
+        const panMesh = new THREE.Mesh(new THREE.BoxGeometry(5.2, 2.2, 11.2), materials.oilPan);
+        panMesh.position.set(0, -3.2, 0);
+        oilPanGroup.add(panMesh);
+        engineGroup.add(oilPanGroup);
+        parts.oilPan = oilPanGroup;
+
+        // Front Pulleys & Balancer
+        const frontDressGroup = new THREE.Group();
+        frontDressGroup.name = "Harmonic Balancer & Timing Pulleys";
+        frontDressGroup.userData = {
+          name: "8-Inch Harmonic Balancer & Serpentine Drive",
+          desc: "Elastomer balanced 8.00\" harmonic damper to attenuate torsional crankshaft vibrations.",
+          specs: "Diameter: 8.00\" | Timing Marks: 0-30° BTDC | Keyway: 3/16\"",
+          torque: "Center Damper Bolt (5/8-18): 60-65 ft-lbs | Pulley Bolts (3/8-16): 20 ft-lbs"
+        };
+        const balancer = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 0.8, 32), materials.chrome);
+        balancer.rotation.x = Math.PI / 2;
+        balancer.position.set(0, -1.0, 6.6);
+        frontDressGroup.add(balancer);
+
+        const waterPumpPulley = new THREE.Mesh(new THREE.CylinderGeometry(1.3, 1.3, 0.6, 32), materials.chrome);
+        waterPumpPulley.rotation.x = Math.PI / 2;
+        waterPumpPulley.position.set(0, 1.6, 6.8);
+        frontDressGroup.add(waterPumpPulley);
+
+        engineGroup.add(frontDressGroup);
+        parts.frontDress = frontDressGroup;
+
+        scene.add(engineGroup);
+        enginePartsRef.current = { parts, pistonNodes };
+
+        // Raycasting for interactive part selection
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        const onCanvasClick = (event) => {
+          const rect = renderer.domElement.getBoundingClientRect();
+          mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+          mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+          raycaster.setFromCamera(mouse, camera);
+          const intersects = raycaster.intersectObjects(engineGroup.children, true);
+          if (intersects.length > 0) {
+            let hit = intersects[0].object;
+            while (hit.parent && hit.parent !== engineGroup) {
+              hit = hit.parent;
+            }
+            if (hit.userData && hit.userData.name) {
+              setSelectedPart(hit.userData);
+            }
+          }
+        };
+        renderer.domElement.addEventListener('click', onCanvasClick);
+
+        // --- ANIMATION LOOP ---
+        let lastTime = performance.now();
+        const animate = (now) => {
+          animFrameIdRef.current = requestAnimationFrame(animate);
+
+          const dt = (now - lastTime) / 1000;
+          lastTime = now;
+
+          if (controlsRef.current) controlsRef.current.update();
+
+          // Running Engine Dynamics
+          if (isRunning) {
+            const radPerSec = (rpm / 60) * 2 * Math.PI;
+            crankAngleRef.current += radPerSec * dt;
+
+            // Crankshaft rotation
+            if (parts.crank) {
+              parts.crank.rotation.z = crankAngleRef.current;
+            }
+            if (parts.frontDress) {
+              parts.frontDress.children[0].rotation.z = crankAngleRef.current;
+              parts.frontDress.children[1].rotation.z = -crankAngleRef.current * 1.2;
+            }
+
+            // Reciprocating Pistons Kinematics (Slider-Crank Formula)
+            pistonNodes.forEach((node) => {
+              const theta = crankAngleRef.current + node.angleOffset;
+              // True kinematic slider-crank displacement along bore
+              const disp = (crankRadius * Math.cos(theta)) + 
+                           Math.sqrt(Math.max(0, Math.pow(rodLength, 2) - Math.pow(crankRadius * Math.sin(theta), 2))) - rodLength;
+              node.group.position.y = node.baseY + disp * 0.45;
+            });
+          }
+
+          renderer.render(scene, camera);
+        };
+        animFrameIdRef.current = requestAnimationFrame(animate);
+
+        // Window resize handler
+        const handleResize = () => {
+          if (!container || !rendererRef.current || !cameraRef.current) return;
+          const w = container.clientWidth;
+          const h = container.clientHeight;
+          rendererRef.current.setSize(w, h);
+          if (cameraRef.current.isPerspectiveCamera) {
+            cameraRef.current.aspect = w / h;
+            cameraRef.current.updateProjectionMatrix();
+          }
+        };
+        window.addEventListener('resize', handleResize);
+
+        return () => {
+          window.removeEventListener('resize', handleResize);
+          if (renderer.domElement) renderer.domElement.removeEventListener('click', onCanvasClick);
+          if (animFrameIdRef.current) cancelAnimationFrame(animFrameIdRef.current);
+          if (renderer.domElement && renderer.domElement.parentNode) {
+            renderer.domElement.parentNode.removeChild(renderer.domElement);
+          }
+          renderer.dispose();
+        };
+      }, [activeTab, viewMode]);
+
+      // --- APPLY EXPLODED VIEW TRANSLATIONS ---
+      useEffect(() => {
+        const parts = enginePartsRef.current.parts;
+        if (!parts) return;
+        const f = explodedAmount; // 0 to 1
+
+        // Explode heads out along 45 degree bank axes
+        if (parts.heads) {
+          parts.heads.children[0].position.set(-3.8 - f * 4.5, 3.2 + f * 4.5, 0);
+          parts.heads.children[1].position.set(3.8 + f * 4.5, 3.2 + f * 4.5, 0);
+        }
+        // Explode intake upward
+        if (parts.intake) {
+          parts.intake.position.y = f * 6.5;
+        }
+        // Explode carburetor upward even further
+        if (parts.carb) {
+          parts.carb.position.y = f * 10.5;
+        }
+        // Explode headers outward
+        if (parts.headers) {
+          parts.headers.children[0].position.x = -4.6 - f * 6.0;
+          parts.headers.children[1].position.x = 4.6 + f * 6.0;
+        }
+        // Explode oil pan downward
+        if (parts.oilPan) {
+          parts.oilPan.position.y = -f * 5.0;
+        }
+        // Explode front dress forward
+        if (parts.frontDress) {
+          parts.frontDress.position.z = f * 4.0;
+        }
+        // Explode crank downward slightly
+        if (parts.crank) {
+          parts.crank.position.y = -f * 1.5;
+        }
+      }, [explodedAmount]);
+
+      // --- DYNO SIMULATION MATH ENGINE ---
+      const dynoPoints = useMemo(() => {
+        // Cam Profile Multipliers
+        const camData = {
+          rv: { hpPeakRpm: 4800, tqPeakRpm: 3200, baseHp: 295, baseTq: 380, ve: 0.82 },
+          street: { hpPeakRpm: 5600, tqPeakRpm: 3800, baseHp: 385, baseTq: 415, ve: 0.90 },
+          radical: { hpPeakRpm: 6400, tqPeakRpm: 4600, baseHp: 445, baseTq: 425, ve: 0.98 }
+        }[camProfile];
+
+        // Carb & Intake scaling factor
+        const carbFactor = carbCfm >= 750 ? 1.05 : carbCfm === 650 ? 1.0 : 0.94;
+        const intakeFactor = intakeType === 'singleplane' ? 1.04 : intakeType === 'tunnelram' ? 1.08 : 0.98;
+
+        const peakHp = Math.round(camData.baseHp * carbFactor * intakeFactor);
+        const peakTq = Math.round(camData.baseTq * (carbCfm >= 650 ? 1.02 : 0.98));
+
+        const curve = [];
+        for (let r = 1500; r <= 6500; r += 250) {
+          // Torque mathematical curve based on Gaussian peak
+          const tqDelta = (r - camData.tqPeakRpm) / 1800;
+          const tq = Math.round(peakTq * Math.exp(-Math.pow(tqDelta, 2)));
+          // Pure physics definition: HP = (Torque * RPM) / 5252
+          const hp = Math.round((tq * r) / 5252);
+          // Airflow CFM demand = (CID * RPM / 3456) * VE
+          const cfmDemand = Math.round(((ENGINE_SPECS.displacementCi * r) / 3456) * camData.ve);
+          // Fuel consumption (lbs/hr) = (HP * BSFC), BSFC ~ 0.50 lb/hp-hr
+          const fuelLbHr = +(hp * 0.49).toFixed(1);
+
+          curve.push({ rpm: r, hp, tq, cfmDemand, fuelLbHr });
+        }
+        return { curve, peakHp, peakTq, camData };
+      }, [camProfile, carbCfm, intakeType]);
+
+      // --- TRANSMISSION DATA TABLE ---
+      const transmissions = {
+        muncieM21: {
+          name: "Muncie M21 Close-Ratio (4-Speed Manual)",
+          type: "Manual",
+          ratios: [2.20, 1.64, 1.28, 1.00],
+          reverse: 2.27,
+          clutchPack: "11.0\" High-Clamp Organic / Cerametallic 26-spline",
+          desc: "Classic GM muscle car 4-speed. Close ratio maintains high RPM in SBC powerband."
+        },
+        muncieM22: {
+          name: "Muncie M22 'Rock Crusher' (4-Speed Manual)",
+          type: "Manual",
+          ratios: [2.20, 1.64, 1.28, 1.00],
+          reverse: 2.27,
+          clutchPack: "11.0\" 10.4\" SFI Spec Billet Steel Flywheel",
+          desc: "Low-helix angle straight-cut gears for maximum torque tolerance and distinct whine."
+        },
+        tremecT56: {
+          name: "Tremec T56 Magnum (6-Speed Manual)",
+          type: "Manual",
+          ratios: [2.66, 1.78, 1.30, 1.00, 0.80, 0.63],
+          reverse: 2.90,
+          clutchPack: "Twin-Disc Hydraulic Throwout Bearing",
+          desc: "Modern 6-speed with double overdrive for high-speed cruising with steep rear gears."
+        },
+        th350: {
+          name: "Turbo-Hydramatic 350 (TH350 3-Speed Auto)",
+          type: "Automatic",
+          ratios: [2.52, 1.52, 1.00],
+          reverse: 2.07,
+          clutchPack: "5-Clutch Direct Pack / Heavy-Duty Intermediate Sprag",
+          desc: "Lightweight, compact GM automatic with very low parasitic loss (~18 HP loss)."
+        },
+        th400: {
+          name: "Turbo-Hydramatic 400 (TH400 3-Speed Auto)",
+          type: "Automatic",
+          ratios: [2.48, 1.48, 1.00],
+          reverse: 2.08,
+          clutchPack: "6-Clutch Forward / 34-Element Sprag Upgrade",
+          desc: "Indestructible transmission capable of holding 800+ HP; slightly higher rotating mass."
+        },
+        r7004: {
+          name: "700R4 / 4L60 (4-Speed Auto with Overdrive)",
+          type: "Automatic",
+          ratios: [3.06, 1.63, 1.00, 0.70],
+          reverse: 2.29,
+          clutchPack: "Z-Pack 3-4 Clutch Upgrade / Corvette Servo",
+          desc: "Deep 3.06 first gear provides immense off-the-line launch with 30% highway overdrive."
+        }
+      };
+
+      // --- VEHICLE PRESETS FOR SWAP & MATCHING ---
+      const vehiclePresets = {
+        chevelle1970: { name: "1970 Chevrolet Chevelle SS", curbWeight: 3750, tire: 26.5, stockGear: 3.73, origin: "Domestic" },
+        camaro1969: { name: "1969 Chevrolet Camaro Z/28", curbWeight: 3300, tire: 25.8, stockGear: 3.73, origin: "Domestic" },
+        corvette1978: { name: "1978 Chevrolet Corvette C3", curbWeight: 3450, tire: 26.8, stockGear: 3.55, origin: "Domestic" },
+        c10square: { name: "1985 Chevrolet C10 Squarebody", curbWeight: 4100, tire: 28.5, stockGear: 3.42, origin: "Domestic" },
+        deuce1932: { name: "1932 Ford 5-Window Coupe Hot Rod", curbWeight: 2600, tire: 27.2, stockGear: 4.11, origin: "Domestic" },
+        datsun240z: { name: "1972 Datsun 240Z (SBC V8 Swap)", curbWeight: 2450, tire: 24.8, stockGear: 3.54, origin: "Foreign Swap" },
+        rx7fd: { name: "1993 Mazda RX-7 FD (SBC V8 Swap)", curbWeight: 2820, tire: 25.5, stockGear: 4.10, origin: "Foreign Swap" }
+      };
+
+      const currentTrans = transmissions[selectedTrans];
+
+      return (
+        <div className="min-h-screen flex flex-col bg-chevyDark text-gray-200">
+          
+          {/* TOP APP HEADER */}
+          <header className="bg-chevyPanel border-b border-gray-700 px-6 py-3 flex flex-wrap items-center justify-between shadow-lg">
+            <div className="flex items-center space-x-3">
+              <div className="w-9 h-9 rounded bg-chevyOrange flex items-center justify-center font-black text-xl text-white shadow-md">
+                350
+              </div>
+              <div>
+                <h1 className="font-bold text-lg tracking-wide text-white flex items-center gap-2">
+                  CHEVROLET SBC 350 <span className="text-xs px-2 py-0.5 rounded bg-chevyOrange/20 text-chevyOrange border border-chevyOrange/40 font-mono">GEN-1 SPEC</span>
+                </h1>
+                <p className="text-xs text-gray-400 font-mono">
+                  Ray's Confirmed Baseline: Rod 5.700" | Deck 9.025" | Chamber 64cc | Gasket .039" | Quench .054"
+                </p>
+              </div>
+            </div>
+
+            {/* MAIN NAVIGATION TABS */}
+            <nav className="flex space-x-1 mt-2 sm:mt-0">
+              {[
+                { id: 'block3d', label: '1. 3D Engine Block', icon: '⚙️' },
+                { id: 'trans', label: '2. Transmission', icon: '🏎️' },
+                { id: 'dyno', label: '3. Dyno & Flow Lab', icon: '📊' },
+                { id: 'schematics', label: '4. Schematics & Specs', icon: '📐' },
+                { id: 'aimatcher', label: '5. AI Matcher & BOM', icon: '🧠' }
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`px-3 py-2 rounded-md text-xs font-semibold transition-all flex items-center gap-1.5 ${
+                    activeTab === tab.id
+                      ? 'bg-chevyOrange text-white shadow-md'
+                      : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                  }`}
+                >
+                  <span>{tab.icon}</span>
+                  <span>{tab.label}</span>
+                </button>
+              ))}
+            </nav>
+          </header>
+
+          {/* MAIN CONTENT AREA */}
+          <main className="flex-1 relative flex flex-col">
+            
+            {/* TAB 1: 3D ENGINE BLOCK (INTERACTIVE THREE.JS VIEWPORT) */}
+            {activeTab === 'block3d' && (
+              <div className="flex-1 flex flex-col md:flex-row relative h-[calc(100vh-62px)]">
+                {/* 3D WebGL Canvas */}
+                <div ref={canvasContainerRef} className="flex-1 relative w-full h-full cursor-grab active:cursor-grabbing blueprint-grid" />
+
+                {/* FLOATING TOP-LEFT VIEW CONTROLS */}
+                <div className="absolute top-4 left-4 z-10 flex flex-wrap gap-2">
+                  <div className="bg-chevyPanel/90 backdrop-blur border border-gray-700 p-1.5 rounded-lg flex space-x-1 shadow-xl">
+                    <button
+                      onClick={() => setViewMode('realistic')}
+                      className={`px-2.5 py-1 text-xs rounded font-medium ${
+                        viewMode === 'realistic' ? 'bg-chevyOrange text-white' : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      Realistic 3D
+                    </button>
+                    <button
+                      onClick={() => setViewMode('isometric')}
+                      className={`px-2.5 py-1 text-xs rounded font-medium ${
+                        viewMode === 'isometric' ? 'bg-chevyOrange text-white' : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      Isometric
+                    </button>
+                    <button
+                      onClick={() => setViewMode('technical')}
+                      className={`px-2.5 py-1 text-xs rounded font-medium ${
+                        viewMode === 'technical' ? 'bg-cadCyan text-black font-bold' : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      CAD Blueprint
+                    </button>
+                  </div>
+
+                  {/* Engine Running Toggle */}
+                  <button
+                    onClick={() => setIsRunning(!isRunning)}
+                    className={`px-3 py-1.5 text-xs font-bold rounded-lg shadow-xl border flex items-center gap-1.5 ${
+                      isRunning
+                        ? 'bg-emerald-600 border-emerald-400 text-white animate-pulse'
+                        : 'bg-chevyPanel border-gray-700 text-gray-300 hover:border-gray-500'
+                    }`}
+                  >
+                    <span>{isRunning ? '⏹ STOP ENGINE' : '▶ RUN ENGINE'}</span>
+                  </button>
+
+                  {/* Audio Synthesizer Toggle */}
+                  <button
+                    onClick={() => setIsAudioOn(!isAudioOn)}
+                    className={`px-2.5 py-1.5 text-xs font-bold rounded-lg shadow-xl border ${
+                      isAudioOn
+                        ? 'bg-amber-600 border-amber-400 text-white'
+                        : 'bg-chevyPanel border-gray-700 text-gray-400'
+                    }`}
+                    title="V8 Engine Audio Rumble"
+                  >
+                    {isAudioOn ? '🔊 Audio ON' : '🔇 Audio Muted'}
+                  </button>
+                </div>
+
+                {/* FLOATING BOTTOM CONTROLS HUD */}
+                <div className="absolute bottom-6 left-6 right-6 md:right-auto md:w-96 z-10 bg-chevyPanel/95 backdrop-blur border border-gray-700 rounded-xl p-4 shadow-2xl space-y-3">
+                  <div className="flex items-center justify-between border-b border-gray-700 pb-2">
+                    <span className="text-xs font-bold tracking-wider text-gray-300">EXPLODED VIEW DISASSEMBLY</span>
+                    <span className="text-xs font-mono text-chevyOrange font-bold">{Math.round(explodedAmount * 100)}%</span>
+                  </div>
+                  
+                  {/* Exploded View Slider */}
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={explodedAmount}
+                    onChange={(e) => setExplodedAmount(parseFloat(e.target.value))}
+                    className="w-full accent-chevyOrange cursor-pointer"
+                  />
+
+                  {/* Engine RPM Slider (Kinematics) */}
+                  <div className="space-y-1 pt-1">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-gray-400">Simulation RPM:</span>
+                      <span className="font-mono text-chevyGold font-bold">{rpm} RPM</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="600"
+                      max="6500"
+                      step="50"
+                      value={rpm}
+                      onChange={(e) => setRpm(parseInt(e.target.value))}
+                      className="w-full accent-chevyGold cursor-pointer"
+                    />
+                  </div>
+
+                  <p className="text-[10px] text-gray-500 italic">
+                    💡 Click on any 3D part (Heads, Block, Carb, Crank, Headers) to inspect real-world clearance and torque specs.
+                  </p>
+                </div>
+
+                {/* FLOATING RIGHT INSPECTOR PANEL (CLICKABLE PART HUD) */}
+                {selectedPart && (
+                  <div className="absolute top-4 right-4 z-10 w-80 bg-chevyPanel/95 backdrop-blur border border-chevyOrange/60 rounded-xl p-4 shadow-2xl animate-fade-in">
+                    <div className="flex items-start justify-between">
+                      <span className="text-[10px] font-mono uppercase tracking-wider text-chevyOrange font-bold">COMPONENT INSPECTOR</span>
+                      <button onClick={() => setSelectedPart(null)} className="text-gray-400 hover:text-white text-xs font-bold">✕</button>
+                    </div>
+                    <h3 className="font-bold text-sm text-white mt-1">{selectedPart.name}</h3>
+                    <p className="text-xs text-gray-300 mt-2 leading-relaxed">{selectedPart.desc}</p>
+                    
+                    <div className="mt-3 p-2.5 rounded bg-black/40 border border-gray-800 space-y-1.5 text-xs font-mono">
+                      <div><span className="text-gray-500">Dimensions:</span> <span className="text-chevyGold">{selectedPart.specs}</span></div>
+                      <div><span className="text-gray-500">Fastener / Torque:</span> <span className="text-emerald-400">{selectedPart.torque}</span></div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 2: TRANSMISSION & DRIVETRAIN */}
+            {activeTab === 'trans' && (
+              <div className="flex-1 p-6 max-w-6xl mx-auto w-full space-y-6">
+                <div>
+                  <h2 className="text-xl font-bold text-white">Transmission & Drivetrain Matching</h2>
+                  <p className="text-xs text-gray-400 mt-1">Manual vs Automatic transmission pairing with gear ratio multipliers for SBC 350 torque delivery.</p>
+                </div>
+
+                {/* Selection Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {Object.entries(transmissions).map(([key, trans]) => (
+                    <div
+                      key={key}
+                      onClick={() => setSelectedTrans(key)}
+                      className={`p-4 rounded-xl border cursor-pointer transition-all ${
+                        selectedTrans === key
+                          ? 'border-chevyOrange bg-chevyOrange/10 shadow-lg'
+                          : 'border-gray-800 bg-chevyPanel hover:border-gray-600'
+                      }`}
+                    >
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-bold text-chevyOrange font-mono">{trans.type.toUpperCase()}</span>
+                        {selectedTrans === key && <span className="text-xs text-chevyGold font-bold">✓ SELECTED</span>}
+                      </div>
+                      <h3 className="font-bold text-sm text-white mt-1">{trans.name}</h3>
+                      <p className="text-xs text-gray-400 mt-2 line-clamp-2">{trans.desc}</p>
+                      
+                      <div className="mt-3 pt-2 border-t border-gray-800 text-xs font-mono text-gray-300 flex justify-between">
+                        <span>1st: {trans.ratios[0]}</span>
+                        <span>Direct: 1.00</span>
+                        {trans.ratios.length > 4 && <span className="text-emerald-400">OD: {trans.ratios[trans.ratios.length - 1]}</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Axle Ratio & Speed-in-Gear Calculation */}
+                <div className="bg-chevyPanel border border-gray-800 rounded-xl p-5 space-y-4">
+                  <h3 className="text-sm font-bold text-white flex items-center justify-between">
+                    <span>Speed vs Engine RPM (Drivetrain Calculator)</span>
+                    <span className="text-xs text-gray-400">Formula: MPH = (RPM × Tire Dia) / (Gear Ratio × Rear Axle × 336)</span>
+                  </h3>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label className="text-xs text-gray-400 block mb-1">Rear Differential Ratio:</label>
+                      <select
+                        value={rearGear}
+                        onChange={(e) => setRearGear(parseFloat(e.target.value))}
+                        className="w-full bg-chevyDark border border-gray-700 rounded p-2 text-xs text-white"
+                      >
+                        <option value={3.08}>3.08:1 (Highway Cruiser)</option>
+                        <option value={3.42}>3.42:1 (Street Performance)</option>
+                        <option value={3.73}>3.73:1 (Street / Strip Ideal)</option>
+                        <option value={4.10}>4.10:1 (Drag Strip Aggressive)</option>
+                        <option value={4.56}>4.56:1 (Radical Drag Spec)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-xs text-gray-400 block mb-1">Tire Outer Diameter (Inches):</label>
+                      <input
+                        type="number"
+                        step="0.5"
+                        value={tireDiameter}
+                        onChange={(e) => setTireDiameter(parseFloat(e.target.value))}
+                        className="w-full bg-chevyDark border border-gray-700 rounded p-2 text-xs text-white"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs text-gray-400 block mb-1">Torque Converter / Clutch:</label>
+                      <div className="p-2 bg-chevyDark border border-gray-700 rounded text-xs text-chevyGold font-mono">
+                        {currentTrans.clutchPack}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Calculated Speed Table */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs font-mono">
+                      <thead className="bg-chevyDark text-gray-400 border-b border-gray-700">
+                        <tr>
+                          <th className="p-2">GEAR</th>
+                          <th className="p-2">RATIO</th>
+                          <th className="p-2">TOTAL REDUCTION</th>
+                          <th className="p-2">MPH @ 2,500 RPM</th>
+                          <th className="p-2">MPH @ 5,500 RPM</th>
+                          <th className="p-2">CRUISE RPM @ 65 MPH</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-800">
+                        {currentTrans.ratios.map((ratio, idx) => {
+                          const totalRatio = ratio * rearGear;
+                          const mphAt2500 = Math.round((2500 * tireDiameter) / (totalRatio * 336));
+                          const mphAt5500 = Math.round((5500 * tireDiameter) / (totalRatio * 336));
+                          const rpmAt65 = Math.round((65 * totalRatio * 336) / tireDiameter);
+                          return (
+                            <tr key={idx} className="hover:bg-gray-800/40">
+                              <td className="p-2 font-bold text-white">Gear {idx + 1}</td>
+                              <td className="p-2 text-chevyGold">{ratio.toFixed(2)}:1</td>
+                              <td className="p-2">{totalRatio.toFixed(2)}:1</td>
+                              <td className="p-2 text-emerald-400">{mphAt2500} MPH</td>
+                              <td className="p-2 text-emerald-400 font-bold">{mphAt5500} MPH</td>
+                              <td className="p-2 text-gray-300">{rpmAt65 > 5500 ? 'N/A' : `${rpmAt65} RPM`}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 3: GRAPHS & DYNO SIMULATION LAB */}
+            {activeTab === 'dyno' && (
+              <div className="flex-1 p-6 max-w-6xl mx-auto w-full space-y-6">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div>
+                    <h2 className="text-xl font-bold text-white">Live Dyno & Volumetric Flow Simulation</h2>
+                    <p className="text-xs text-gray-400 mt-1">
+                      Computed from Ray's 64cc chamber, 9.90:1 CR baseline, 4.000" bore, and 3.480" stroke.
+                    </p>
+                  </div>
+
+                  <div className="flex gap-4">
+                    <div className="bg-chevyPanel px-4 py-2 rounded-xl border border-gray-700">
+                      <div className="text-[10px] text-gray-400 font-mono">PEAK HORSEPOWER</div>
+                      <div className="text-xl font-black text-chevyOrange">{dynoPoints.peakHp} HP <span className="text-xs text-gray-400 font-normal">@ {dynoPoints.camData.hpPeakRpm} RPM</span></div>
+                    </div>
+                    <div className="bg-chevyPanel px-4 py-2 rounded-xl border border-gray-700">
+                      <div className="text-[10px] text-gray-400 font-mono">PEAK TORQUE</div>
+                      <div className="text-xl font-black text-chevyGold">{dynoPoints.peakTq} FT-LBS <span className="text-xs text-gray-400 font-normal">@ {dynoPoints.camData.tqPeakRpm} RPM</span></div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Configuration Controls Bar */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-chevyPanel p-4 rounded-xl border border-gray-800">
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Camshaft Profile:</label>
+                    <select
+                      value={camProfile}
+                      onChange={(e) => setCamProfile(e.target.value)}
+                      className="w-full bg-chevyDark border border-gray-700 rounded p-2 text-xs text-white"
+                    >
+                      <option value="rv">RV / High Torque (212°/218° @ .050", .450" Lift)</option>
+                      <option value="street">Street / Strip Hydraulic Roller (224°/230°, .510" Lift)</option>
+                      <option value="radical">Radical Solid Roller (242°/248°, .560" Lift)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Carburetor Sizing (CFM):</label>
+                    <select
+                      value={carbCfm}
+                      onChange={(e) => setCarbCfm(parseInt(e.target.value))}
+                      className="w-full bg-chevyDark border border-gray-700 rounded p-2 text-xs text-white"
+                    >
+                      <option value={600}>600 CFM (Crisp Throttle Street)</option>
+                      <option value={650}>650 CFM (Ideal SBC 350 Sizing)</option>
+                      <option value={750}>750 CFM (High-RPM Double Pumper)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Intake Manifold Style:</label>
+                    <select
+                      value={intakeType}
+                      onChange={(e) => setIntakeType(e.target.value)}
+                      className="w-full bg-chevyDark border border-gray-700 rounded p-2 text-xs text-white"
+                    >
+                      <option value="dualplane">Dual-Plane High Rise (1,500 - 6,200 RPM)</option>
+                      <option value="singleplane">Single-Plane Open Plenum (3,500 - 7,200 RPM)</option>
+                      <option value="tunnelram">Dual-Quad Tunnel Ram (Pro Street)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Dyno SVG Visualization */}
+                <div className="bg-chevyPanel border border-gray-800 rounded-xl p-5">
+                  <div className="flex justify-between items-center mb-4">
+                    <span className="text-xs font-bold tracking-wider text-gray-300">DYNO POWER & TORQUE CURVES</span>
+                    <div className="flex gap-4 text-xs font-mono">
+                      <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-chevyOrange"></span> Horsepower (HP)</span>
+                      <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-chevyGold"></span> Torque (Ft-Lbs)</span>
+                    </div>
+                  </div>
+
+                  {/* SVG Chart */}
+                  <div className="relative h-64 w-full">
+                    <svg className="w-full h-full" viewBox="0 0 800 240">
+                      {/* Grid Lines */}
+                      {[0, 60, 120, 180, 240].map((y) => (
+                        <line key={y} x1="50" y1={y} x2="780" y2={y} stroke="#2a3036" strokeWidth="1" />
+                      ))}
+                      {/* 5252 RPM Crossover Line */}
+                      <line x1={50 + ((5252 - 1500) / (6500 - 1500)) * 730} y1="0" x2={50 + ((5252 - 1500) / (6500 - 1500)) * 730} y2="240" stroke="#4a5568" strokeDasharray="4" />
+                      <text x={50 + ((5252 - 1500) / (6500 - 1500)) * 730 + 4} y="15" fill="#718096" fontSize="10" fontFamily="monospace">5252 RPM Crossover</text>
+
+                      {/* HP Curve */}
+                      <path
+                        d={dynoPoints.curve.reduce((acc, pt, idx) => {
+                          const x = 50 + ((pt.rpm - 1500) / (6500 - 1500)) * 730;
+                          const y = 240 - (pt.hp / 500) * 230;
+                          return idx === 0 ? `M ${x} ${y}` : `${acc} L ${x} ${y}`;
+                        }, '')}
+                        fill="none"
+                        stroke="#d83b01"
+                        strokeWidth="3.5"
+                      />
+
+                      {/* Torque Curve */}
+                      <path
+                        d={dynoPoints.curve.reduce((acc, pt, idx) => {
+                          const x = 50 + ((pt.rpm - 1500) / (6500 - 1500)) * 730;
+                          const y = 240 - (pt.tq / 500) * 230;
+                          return idx === 0 ? `M ${x} ${y}` : `${acc} L ${x} ${y}`;
+                        }, '')}
+                        fill="none"
+                        stroke="#e5a823"
+                        strokeWidth="3.5"
+                      />
+                    </svg>
+                  </div>
+                </div>
+
+                {/* Readouts Data Grid */}
+                <div className="overflow-x-auto bg-chevyPanel border border-gray-800 rounded-xl">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead className="bg-chevyDark text-gray-400 border-b border-gray-700">
+                      <tr>
+                        <th className="p-3">ENGINE RPM</th>
+                        <th className="p-3 text-chevyOrange">HORSEPOWER</th>
+                        <th className="p-3 text-chevyGold">TORQUE (FT-LBS)</th>
+                        <th className="p-3 text-cadCyan">AIRFLOW DEMAND (CFM)</th>
+                        <th className="p-3">FUEL FLOW (LBS/HR)</th>
+                        <th className="p-3">EST. GPH (GASOLINE)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-800">
+                      {dynoPoints.curve.filter((_, i) => i % 2 === 0).map((row) => (
+                        <tr key={row.rpm} className="hover:bg-gray-800/40">
+                          <td className="p-3 font-bold text-white">{row.rpm} RPM</td>
+                          <td className="p-3 text-chevyOrange font-bold">{row.hp} HP</td>
+                          <td className="p-3 text-chevyGold font-bold">{row.tq} ft-lbs</td>
+                          <td className="p-3 text-cadCyan">{row.cfmDemand} CFM</td>
+                          <td className="p-3">{row.fuelLbHr} lb/hr</td>
+                          <td className="p-3 text-gray-300">{(row.fuelLbHr / 6.0).toFixed(1)} GPH</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 4: SCHEMATICS & TORQUE SPECIFICATIONS */}
+            {activeTab === 'schematics' && (
+              <div className="flex-1 p-6 max-w-6xl mx-auto w-full space-y-6">
+                <div>
+                  <h2 className="text-xl font-bold text-white">Schematics, Fastener Tolerances & Torque Sequence</h2>
+                  <p className="text-xs text-gray-400 mt-1">Official Chevrolet Gen-1 SBC factory & high-performance bolt specs and clearance callouts.</p>
+                </div>
+
+                {/* Ray's Confirmed Baseline Callout Cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="p-3 bg-chevyPanel border border-gray-700 rounded-xl">
+                    <div className="text-[10px] text-gray-400 font-mono">ROD LENGTH</div>
+                    <div className="text-lg font-bold text-chevyOrange">5.700 in</div>
+                    <div className="text-[10px] text-gray-500">Center-to-Center</div>
+                  </div>
+                  <div className="p-3 bg-chevyPanel border border-gray-700 rounded-xl">
+                    <div className="text-[10px] text-gray-400 font-mono">DECK HEIGHT</div>
+                    <div className="text-lg font-bold text-chevyOrange">9.025 in</div>
+                    <div className="text-[10px] text-gray-500">Crank centerline to deck</div>
+                  </div>
+                  <div className="p-3 bg-chevyPanel border border-gray-700 rounded-xl">
+                    <div className="text-[10px] text-gray-400 font-mono">CHAMBER VOLUME</div>
+                    <div className="text-lg font-bold text-chevyGold">64.0 cc</div>
+                    <div className="text-[10px] text-gray-500">Combustion Chamber</div>
+                  </div>
+                  <div className="p-3 bg-chevyPanel border border-emerald-500/40 rounded-xl bg-emerald-500/5">
+                    <div className="text-[10px] text-emerald-400 font-mono">QUENCH / SQUISH</div>
+                    <div className="text-lg font-bold text-emerald-400">0.054 in</div>
+                    <div className="text-[10px] text-gray-400">.039" gasket + .015" deck</div>
+                  </div>
+                </div>
+
+                {/* Interactive Cylinder Head Torque Sequence Blueprint */}
+                <div className="bg-chevyPanel border border-gray-800 rounded-xl p-5">
+                  <h3 className="text-sm font-bold text-white mb-2">SBC Cylinder Head 17-Bolt Torquing Sequence (Tighten in 3 Stages: 25 ➔ 45 ➔ 65 ft-lbs)</h3>
+                  <p className="text-xs text-gray-400 mb-4">Coat threads with ARP thread sealer or non-hardening Permatex because head bolts enter the water jacket.</p>
+                  
+                  {/* Visual 17-bolt head pattern */}
+                  <div className="p-6 bg-chevyDark border border-gray-700 rounded-xl relative max-w-2xl mx-auto flex flex-col gap-6">
+                    {/* Top Row Bolts */}
+                    <div className="flex justify-between items-center px-4">
+                      {[13, 9, 5, 1, 3, 7, 11, 15, 17].map((num) => (
+                        <div key={num} className="flex flex-col items-center">
+                          <div className="w-8 h-8 rounded-full border-2 border-chevyOrange bg-chevyPanel flex items-center justify-center font-bold text-xs text-white shadow-md">
+                            {num}
+                          </div>
+                          <span className="text-[9px] text-gray-500 mt-1">7/16"</span>
+                        </div>
+                      ))}
+                    </div>
+                    {/* Bottom Row Bolts */}
+                    <div className="flex justify-between items-center px-8">
+                      {[14, 10, 6, 2, 4, 8, 12, 16].map((num) => (
+                        <div key={num} className="flex flex-col items-center">
+                          <div className="w-8 h-8 rounded-full border-2 border-chevyGold bg-chevyPanel flex items-center justify-center font-bold text-xs text-white shadow-md">
+                            {num}
+                          </div>
+                          <span className="text-[9px] text-gray-500 mt-1">7/16"</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Master SBC 350 Torque & Clearance Table */}
+                <div className="overflow-x-auto bg-chevyPanel border border-gray-800 rounded-xl">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead className="bg-chevyDark text-gray-400 border-b border-gray-700">
+                      <tr>
+                        <th className="p-3">FASTENER LOCATION</th>
+                        <th className="p-3">THREAD SIZE</th>
+                        <th className="p-3 text-chevyOrange">FACTORY TORQUE</th>
+                        <th className="p-3 text-emerald-400">ARP / PERFORMANCE SPEC</th>
+                        <th className="p-3">CRITICAL LUBE & NOTES</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-800">
+                      <tr>
+                        <td className="p-3 font-bold text-white">Main Bearing Caps (Inner)</td>
+                        <td className="p-3">7/16-14</td>
+                        <td className="p-3 text-chevyOrange">70 ft-lbs</td>
+                        <td className="p-3 text-emerald-400">75 ft-lbs with ARP lube</td>
+                        <td className="p-3 text-gray-400">Engine oil or moly lube on threads/washer</td>
+                      </tr>
+                      <tr>
+                        <td className="p-3 font-bold text-white">Main Bearing Caps (Outer 4-Bolt)</td>
+                        <td className="p-3">7/16-14</td>
+                        <td className="p-3 text-chevyOrange">65 ft-lbs</td>
+                        <td className="p-3 text-emerald-400">65 ft-lbs with ARP lube</td>
+                        <td className="p-3 text-gray-400">Splayed or straight caps</td>
+                      </tr>
+                      <tr>
+                        <td className="p-3 font-bold text-white">Connecting Rod Bolts (Ray's 5.700")</td>
+                        <td className="p-3">3/8-24</td>
+                        <td className="p-3 text-chevyOrange">35 ft-lbs</td>
+                        <td className="p-3 text-emerald-400">45 ft-lbs (.0060" bolt stretch)</td>
+                        <td className="p-3 text-gray-400">Bolt stretch gauge is gold standard</td>
+                      </tr>
+                      <tr>
+                        <td className="p-3 font-bold text-white">Cylinder Head Bolts</td>
+                        <td className="p-3">7/16-14</td>
+                        <td className="p-3 text-chevyOrange">65 ft-lbs</td>
+                        <td className="p-3 text-emerald-400">70 ft-lbs in 3 equal steps</td>
+                        <td className="p-3 text-amber-400 font-semibold">Teflon sealant required on all threads!</td>
+                      </tr>
+                      <tr>
+                        <td className="p-3 font-bold text-white">Intake Manifold Bolts</td>
+                        <td className="p-3">3/8-16</td>
+                        <td className="p-3 text-chevyOrange">30 ft-lbs</td>
+                        <td className="p-3 text-emerald-400">25-30 ft-lbs</td>
+                        <td className="p-3 text-gray-400">Torque from center out to prevent leaks</td>
+                      </tr>
+                      <tr>
+                        <td className="p-3 font-bold text-white">Flywheel / Flexplate Bolts</td>
+                        <td className="p-3">7/16-20</td>
+                        <td className="p-3 text-chevyOrange">60 ft-lbs</td>
+                        <td className="p-3 text-emerald-400">65 ft-lbs with Loctite</td>
+                        <td className="p-3 text-gray-400">Apply blue threadlocker to blind crankshaft holes</td>
+                      </tr>
+                      <tr>
+                        <td className="p-3 font-bold text-white">Harmonic Balancer Center Bolt</td>
+                        <td className="p-3">5/8-18</td>
+                        <td className="p-3 text-chevyOrange">60 ft-lbs</td>
+                        <td className="p-3 text-emerald-400">65-70 ft-lbs</td>
+                        <td className="p-3 text-gray-400">Clean threads; do not use bolt to pull balancer!</td>
+                      </tr>
+                      <tr>
+                        <td className="p-3 font-bold text-white">Spark Plugs (14mm Tapered Seat)</td>
+                        <td className="p-3">14mm x 1.25</td>
+                        <td className="p-3 text-chevyOrange">15 ft-lbs</td>
+                        <td className="p-3 text-emerald-400">11-15 ft-lbs (Aluminum heads)</td>
+                        <td className="p-3 text-gray-400">Use anti-seize paste on aluminum threads</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 5: AI COMPONENT MATCHER & BOM PRICING */}
+            {activeTab === 'aimatcher' && (
+              <div className="flex-1 p-6 max-w-6xl mx-auto w-full space-y-6">
+                <div>
+                  <h2 className="text-xl font-bold text-white">AI Component Matching & Itemized Bill of Materials (BOM)</h2>
+                  <p className="text-xs text-gray-400 mt-1">
+                    Select any domestic or foreign vehicle chassis to verify component clearance, torque converter stall, and parts pricing.
+                  </p>
+                </div>
+
+                {/* Vehicle Chassis Selector */}
+                <div className="bg-chevyPanel p-4 rounded-xl border border-gray-800">
+                  <label className="text-xs text-gray-400 block mb-2 font-bold uppercase tracking-wider">CHOOSE SWAP / PROJECT VEHICLE:</label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                    {Object.entries(vehiclePresets).map(([key, v]) => (
+                      <button
+                        key={key}
+                        onClick={() => setSelectedVehicle(key)}
+                        className={`p-3 rounded-lg border text-left transition-all ${
+                          selectedVehicle === key
+                            ? 'border-chevyOrange bg-chevyOrange/15 text-white shadow-md'
+                            : 'border-gray-800 bg-chevyDark/60 text-gray-400 hover:border-gray-700'
+                        }`}
+                      >
+                        <div className="text-[10px] text-chevyGold font-mono">{v.origin}</div>
+                        <div className="text-xs font-bold text-white mt-0.5">{v.name}</div>
+                        <div className="text-[10px] text-gray-500 mt-1">Weight: {v.curbWeight} lbs | Tire: {v.tire}"</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* AI Compatibility Diagnostic Report */}
+                <div className="bg-chevyPanel border border-emerald-500/30 rounded-xl p-5 space-y-3">
+                  <div className="flex items-center space-x-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
+                    <h3 className="text-sm font-bold text-emerald-400 uppercase tracking-wider">AI BUILD VERIFICATION REPORT</h3>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono">
+                    <div className="p-3 bg-chevyDark rounded border border-gray-800">
+                      <div className="text-gray-500">QUENCH HEIGHT CHECK:</div>
+                      <div className="text-emerald-400 font-bold mt-1">0.054" - OPTIMAL PASS</div>
+                      <div className="text-[10px] text-gray-400 mt-1">
+                        Ray's .039" compressed gasket + .015" deck produces ideal squish to resist pump-gas detonation at 9.90:1 CR.
+                      </div>
+                    </div>
+
+                    <div className="p-3 bg-chevyDark rounded border border-gray-800">
+                      <div className="text-gray-500">CARB CFM SIZING:</div>
+                      <div className="text-emerald-400 font-bold mt-1">{carbCfm} CFM - MATCHED</div>
+                      <div className="text-[10px] text-gray-400 mt-1">
+                        SBC 350 at 6,000 RPM pulls 515 CFM theoretical. {carbCfm} CFM provides crisp throttle response without wet-manifold puddling.
+                      </div>
+                    </div>
+
+                    <div className="p-3 bg-chevyDark rounded border border-gray-800">
+                      <div className="text-gray-500">ROD / STROKE RATIO:</div>
+                      <div className="text-emerald-400 font-bold mt-1">1.638:1 - IDEAL STREET</div>
+                      <div className="text-[10px] text-gray-400 mt-1">
+                        5.700" rod on 3.480" stroke keeps piston dwell time and cylinder wall side-thrust within safe factory tolerances.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Itemized Parts Pricing Sheet (BOM) */}
+                <div className="bg-chevyPanel border border-gray-800 rounded-xl p-5">
+                  <h3 className="text-sm font-bold text-white mb-3">Itemized Bill of Materials (BOM) & Real-World Pricing</h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs font-mono">
+                      <thead className="bg-chevyDark text-gray-400 border-b border-gray-700">
+                        <tr>
+                          <th className="p-2.5">ITEM CATEGORY</th>
+                          <th className="p-2.5">RECOMMENDED PART / SUPPLIER</th>
+                          <th className="p-2.5">PART NUMBER</th>
+                          <th className="p-2.5">EST. PRICE</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-800">
+                        <tr>
+                          <td className="p-2.5 text-white font-bold">Connecting Rods (5.700")</td>
+                          <td className="p-2.5 text-gray-300">Scat Forged 4340 I-Beam 5.700"</td>
+                          <td className="p-2.5 text-chevyGold">SCA-25700</td>
+                          <td className="p-2.5 text-emerald-400 font-bold">$345.00</td>
+                        </tr>
+                        <tr>
+                          <td className="p-2.5 text-white font-bold">Head Gaskets (.039")</td>
+                          <td className="p-2.5 text-gray-300">Fel-Pro Performance Pre-Flattened (.039" compressed)</td>
+                          <td className="p-2.5 text-chevyGold">FEL-1003</td>
+                          <td className="p-2.5 text-emerald-400 font-bold">$98.00</td>
+                        </tr>
+                        <tr>
+                          <td className="p-2.5 text-white font-bold">Cylinder Heads (64cc)</td>
+                          <td className="p-2.5 text-gray-300">Edelbrock E-Street 185cc / 64cc Aluminum Heads (Pair)</td>
+                          <td className="p-2.5 text-chevyGold">EDL-5089</td>
+                          <td className="p-2.5 text-emerald-400 font-bold">$1,290.00</td>
+                        </tr>
+                        <tr>
+                          <td className="p-2.5 text-white font-bold">Pistons (4.000" Bore)</td>
+                          <td className="p-2.5 text-gray-300">Keith Black Hypereutectic Flat-Top -5cc reliefs</td>
+                          <td className="p-2.5 text-chevyGold">KB-115-000</td>
+                          <td className="p-2.5 text-emerald-400 font-bold">$360.00</td>
+                        </tr>
+                        <tr>
+                          <td className="p-2.5 text-white font-bold">Intake Manifold</td>
+                          <td className="p-2.5 text-gray-300">Edelbrock Performer RPM Dual-Plane</td>
+                          <td className="p-2.5 text-chevyGold">EDL-7101</td>
+                          <td className="p-2.5 text-emerald-400 font-bold">$325.00</td>
+                        </tr>
+                        <tr>
+                          <td className="p-2.5 text-white font-bold">Carburetor (650 CFM)</td>
+                          <td className="p-2.5 text-gray-300">Holley 4150 Classic Double Pumper 650 CFM</td>
+                          <td className="p-2.5 text-chevyGold">HLY-0-4777C</td>
+                          <td className="p-2.5 text-emerald-400 font-bold">$589.00</td>
+                        </tr>
+                        <tr>
+                          <td className="p-2.5 text-white font-bold">Engine Fastener Kit</td>
+                          <td className="p-2.5 text-gray-300">ARP High Performance Complete Hex Bolt Kit</td>
+                          <td className="p-2.5 text-chevyGold">ARP-534-9501</td>
+                          <td className="p-2.5 text-emerald-400 font-bold">$189.00</td>
+                        </tr>
+                        <tr className="bg-chevyDark font-bold text-sm">
+                          <td colSpan="3" className="p-3 text-right text-white">TOTAL ESTIMATED BUILD ESTIMATE:</td>
+                          <td className="p-3 text-chevyGold font-black">$3,196.00</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+          </main>
+        </div>
+      );
+    }
+
+    // Render the React Application
+    ReactDOM.createRoot(document.getElementById('root')).render(<SBC350App />);
+  </script>
+</body>
+</html>
