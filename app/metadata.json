@@ -1,0 +1,6 @@
+{
+  "name": "SBC 350 Engine Builder - MODSIM & HOOPS 3D CAD Studio",
+  "description": "Precision Chevrolet SBC 350 V8 engine builder and universal drivetrain simulator combining 3D CAD visualization, MODSIM kinematic simulation, 28-transmission compatibility matrix, full mechanics subsystem suite, and professional machine shop build sheet.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
