@@ -4,7 +4,16 @@ Ray's 3D V8 Chevy small-block builder — 3D CAD engine workbench, transmission 
 
 - **Live:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/ (v7)
 - **Live v8:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v8/ — same app, Tab 09 drawings fixes + dyno falloff fix. v7 stays live at the root; v8 lives under `/v8/`.
+- **Live v9:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v9/ — the separate next version (Ray's word Nov 24). v7 and v8 stay live.
 - **Baseline (Ray, confirmed):** 4.000" bore, 3.480" stroke, 5.700" rods, 9.025" deck height, 64cc chambers, .039" gasket with .015" deck clearance; 9.90:1 compression, 0.054" quench. All dimensions/specs are Gemini's from Ray's numbers — for Ray to true, as with the buoy.
+
+## v9 (current) — separate version for the incoming work (Nov 24, 2026)
+
+Ray's word Nov 24: "Go ahead make a separate version" — v9 is the separate version where Gemini's new codes land as they come out, while v7 stays live at the root and v8 stays live under `/v8/`.
+
+- **Content right now:** v9 currently holds the same code as v8 (Tab 09 drawings fixes + dyno falloff fix) — the new work is still being written in the AI Studio chats and had not landed when v9 was published. Each delivery updates v9 in place: Tabs 10–11 (Engineering Config, More Drawings — coded, download in flight), the per-part modification section, the Matrix page (Tab 12, shape-drawing area + engine-compatibility matrix), the realistic PBR per-model fix + cam-core spin fix, and the multi-brand engine/vehicle catalog with the all-manufacturers expansion.
+- **Feed rule:** every delivery is pulled down, grep-verified, landed into the local `ai-studio-app-v9/` source, built, and republished to `v9/` — landing log at `v9-landing-log.md` (local, uncommitted).
+- **Build:** source `ai-studio-app-v9/` (local, uncommitted, like v7/v8); built with `npm run build -- --base=/sbc-350-3d-modeler/v9/`; published build in `v9/` (git tag `v9`).
 
 ## v8 (current) — Tab 09 drawings fixes + dyno falloff fix (Nov 24, 2026)
 
