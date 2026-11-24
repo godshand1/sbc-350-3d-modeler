@@ -5,9 +5,17 @@ Ray's 3D V8 Chevy small-block builder — 3D CAD engine workbench, transmission 
 - **Live:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/ (v7)
 - **Live v8:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v8/ — same app, Tab 09 drawings fixes + dyno falloff fix. v7 stays live at the root; v8 lives under `/v8/`.
 - **Live v9:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v9/ — the separate next version (Ray's word Nov 24). v7 and v8 stay live.
+- **Live v10:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v10/ — the new version (Ray's word Nov 24, "Use GitHub to launch it"). v7, v8 and v9 stay live.
 - **Baseline (Ray, confirmed):** 4.000" bore, 3.480" stroke, 5.700" rods, 9.025" deck height, 64cc chambers, .039" gasket with .015" deck clearance; 9.90:1 compression, 0.054" quench. All dimensions/specs are Gemini's from Ray's numbers — for Ray to true, as with the buoy.
 
-## v9 (current) — separate version for the incoming work (Nov 24, 2026)
+## v10 (current) — new version with cam-core spin fix (Nov 24, 2026)
+
+Ray's word Nov 24: "Use GitHub to launch it" — v10 is launched on GitHub Pages as the new version, while v7 stays live at the root, v8 under `/v8/` and v9 under `/v9/`.
+
+- **Content right now:** v9's code plus the cam-core spin fix — the camshaft in Run Cycle mode used to tumble end-over-end through the block; it now spins on its own axis (`camCore.rotation.y = crankAngle * 0.5`, verified with the project's own three.js: the shaft axis stays [0,0,1] through a full revolution). The new work has NOT landed yet: Tabs 10–11, the per-part Modification Studio (built in the Tabs4Pods playground chat, mounting in progress), the Matrix page (Tab 12), the realistic PBR per-model fix (audit in progress), and the multi-brand engine/vehicle catalog — each delivery updates v10 in place as it lands and is verified.
+- **Build:** source `ai-studio-app-v10/` (local, uncommitted, like v7/v8/v9); built with `npm run build -- --base=/sbc-350-3d-modeler/v10/`; published build in `v10/` (git tag `v10`).
+
+## v9 — separate version for the incoming work (Nov 24, 2026)
 
 Ray's word Nov 24: "Go ahead make a separate version" — v9 is the separate version where Gemini's new codes land as they come out, while v7 stays live at the root and v8 stays live under `/v8/`.
 
