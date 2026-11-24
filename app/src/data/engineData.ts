@@ -36,7 +36,8 @@ export const RAY_BASELINE_CONFIG: EngineConfig = {
   stallSpeed: 2400,         // 2,400 RPM stall
   rearGear: 3.73,           // 3.73:1 rear axle
   tireDiameter: 26.0,       // 26.0" tire diameter
-  selectedVehicle: 'camaro1969'
+  selectedVehicle: 'camaro1969',
+  inductionDress: 'carb_hei'
 };
 
 export const INTAKE_MANIFOLDS = [

@@ -19,6 +19,7 @@ export type SubsystemIsolation = 'all' | 'rotating' | 'valvetrain' | 'ignition' 
 export type PistonAlloy = '4032' | '2618' | 'hypereutectic';
 export type RingApplication = 'street' | 'street_strip' | 'nitrous';
 export type CamProfileId = 'rv' | 'street' | 'radical';
+export type InductionDressMode = 'carb_hei' | 'mpfi_cnp';
 
 export interface EngineConfig {
   bore: number;              // inches (Ray's 4.000)
@@ -44,6 +45,7 @@ export interface EngineConfig {
   rearGear: number;          // e.g. 3.73
   tireDiameter: number;      // inches e.g. 26.0
   selectedVehicle: string;   // vehicle id
+  inductionDress?: InductionDressMode; // 'carb_hei' | 'mpfi_cnp'
 }
 
 export interface EngineCatalogItem {
@@ -362,4 +364,3 @@ export interface MeasurementState {
   distanceMm: number | null;
   surfaceLabel: string | null;
 }
-

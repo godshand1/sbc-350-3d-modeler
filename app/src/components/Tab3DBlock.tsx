@@ -71,7 +71,6 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [viewMode, setViewMode] = useState<EngineViewMode>('realistic');
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('none');
-  const [inductionDress, setInductionDress] = useState<InductionDressMode>('carb_hei');
   const [supportMode, setSupportMode] = useState<SupportMode>('shop_stand');
   const [showSpecTree, setShowSpecTree] = useState<boolean>(false);
   const [showTechDrawings, setShowTechDrawings] = useState<boolean>(false);
@@ -80,6 +79,8 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
   const [selectedPart, setSelectedPart] = useState<InspectionData | null>(null);
   const [focusPartRequest, setFocusPartRequest] = useState<{ key: string; nonce: number } | null>(null);
   const captureFnRef = useRef<(() => void) | null>(null);
+
+  const inductionDress = config.inductionDress || 'carb_hei';
 
   const builtInDrawing = React.useMemo(
     () => getEngineDrawingSheet(config, specs, activeStoreSelection),
@@ -156,10 +157,10 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
 
   return (
     <div className="w-full h-full min-h-[560px] flex flex-col bg-[#0d1014] overflow-hidden select-none">
-      {/* Top Docked CAD Drafting Toolbar (Zero Viewport Occlusion) */}
+      {/* Top Docked CAD Drafting Toolbar */}
       <div className="shrink-0 bg-[#12161c] border-b border-slate-800 px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="flex flex-wrap items-center gap-2">
-          {/* Cutaway Modes */}
+          {/* Section Cutaway Modes */}
           <div className="flex items-center gap-0.5 bg-[#0d1014] border border-slate-800 p-0.5 rounded-md">
             <span className="px-2 text-[11px] font-medium text-slate-400">Section</span>
             {[
@@ -215,7 +216,7 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
             ].map((dress) => (
               <button
                 key={dress.id}
-                onClick={() => setInductionDress(dress.id as InductionDressMode)}
+                onClick={() => onUpdateConfig({ inductionDress: dress.id as InductionDressMode })}
                 className={`px-2 py-1 rounded text-[11px] font-medium transition whitespace-nowrap ${
                   inductionDress === dress.id
                     ? 'bg-emerald-500 text-slate-950 font-semibold'
@@ -227,7 +228,7 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
             ))}
           </div>
 
-          {/* Standard Orthographic / Isometric Camera Views */}
+          {/* Orthographic / Isometric Camera Views */}
           <div className="flex items-center gap-0.5 bg-[#0d1014] border border-slate-800 p-0.5 rounded-md">
             <span className="px-2 text-[11px] font-medium text-slate-400">View</span>
             {(
@@ -278,7 +279,7 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
           </div>
         </div>
 
-        {/* Right Tool Actions */}
+        {/* Right Action Tools */}
         <div className="flex flex-wrap items-center gap-1.5">
           <button
             onClick={() =>
@@ -323,7 +324,7 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
                 ? 'bg-emerald-500/15 border-emerald-500/60 text-emerald-300'
                 : 'bg-[#0d1014] border-slate-700 text-slate-400 hover:text-white'
             }`}
-            title="Switch between Tubular Shop Engine Stand and Hot-Rod Chassis Rails (use Spec Tree eye icon to hide)"
+            title="Switch between Tubular Shop Engine Stand and Hot-Rod Chassis Rails"
           >
             <Layers className="w-3.5 h-3.5" />
             <span>{supportMode === 'shop_stand' ? 'Shop Stand' : 'Hot-Rod Chassis'}</span>
@@ -383,7 +384,7 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
         </div>
       </div>
 
-      {/* Center Unobstructed 3D CAD Viewport */}
+      {/* Main 3D CAD Viewport */}
       <div className="flex-1 w-full relative min-h-0">
         <Engine3DScene
           config={config}
@@ -412,7 +413,6 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
           focusPartRequest={focusPartRequest}
         />
 
-        {/* CATIA Specification Tree & GD&T Stackup Drawer */}
         <SpecificationTreeDrawer
           isOpen={showSpecTree}
           onClose={() => setShowSpecTree(false)}
@@ -427,7 +427,6 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
           rpm={rpm}
         />
 
-        {/* Technical Drawing BOM Sheet + Online Spec Lookup + Diagram Upload */}
         <TechDrawingSpecsDrawer
           isOpen={showTechDrawings}
           onClose={() => setShowTechDrawings(false)}
@@ -447,7 +446,6 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
           hasCustomApplied={Boolean(customEngineDrawing)}
         />
 
-        {/* 3D Markup Annotation Callout Pins */}
         <MarkupAnnotations
           showMarkups={showMarkups}
           specs={specs}
@@ -461,10 +459,8 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
           }}
         />
 
-        {/* Inspection Card HUD */}
         <InspectionHUD part={selectedPart} onClose={() => setSelectedPart(null)} />
 
-        {/* CAD Caliper & Volumetric Measurement HUD */}
         <MeasurementHUD
           measurementState={measurementState}
           onUpdateMeasurement={setMeasurementState}
@@ -473,7 +469,7 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
           onApplyPreset={handleApplyPreset}
         />
 
-        {/* ISO/ASME Technical Drawing Corner Title Block */}
+        {/* Dynamic ASME Corner Title Block */}
         <div className="pointer-events-none absolute bottom-3 right-3 z-10 bg-[#0d1014]/90 border border-slate-700/90 rounded-md px-3 py-2 font-mono text-[10px] text-slate-300 space-y-0.5 tabular-nums hidden sm:block">
           <div className="flex items-center justify-between gap-4 border-b border-slate-800 pb-1">
             <span className="font-bold text-white">DWG: MODSIM-{specs.displacementCi}</span>
@@ -487,13 +483,14 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
             <span className="text-emerald-400">QUENCH {specs.quenchDistance}"</span>
             <span>·</span>
             <span className="text-amber-400">CR {specs.staticCR}:1</span>
+            <span>·</span>
+            <span className="text-orange-400">{specs.peakHp} HP / {specs.peakTq} TQ</span>
           </div>
         </div>
       </div>
 
-      {/* Bottom Docked Drafting & Simulation Control Bar (Docked Outside Canvas) */}
+      {/* Bottom Docked Simulation Control Bar */}
       <div className="shrink-0 bg-[#12161c] border-t border-slate-800 px-4 py-2 space-y-2 text-xs">
-        {/* Subsystem Isolation + Collapse Toggle */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-1">
             <span className="text-[11px] font-medium text-slate-400 mr-1.5">Isolate Assembly:</span>
@@ -554,7 +551,7 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
               />
             </div>
 
-            {/* Kinematic Cycle Speed */}
+            {/* Cycle Speed */}
             <div className="space-y-1">
               <div className="flex items-center justify-between text-[11px]">
                 <span className="text-slate-300 font-medium flex items-center gap-1.5">
@@ -576,7 +573,7 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
               />
             </div>
 
-            {/* Section Plane or Analysis Legend */}
+            {/* Section Plane Offset */}
             {cutawayMode !== 'none' ? (
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-[11px]">
@@ -600,7 +597,7 @@ export const Tab3DBlock: React.FC<Tab3DBlockProps> = ({
               </div>
             ) : (
               <div className="text-[11px] text-slate-400">
-                Click any 3D part for inspection specs, or switch Section mode to inspect internal bore &amp; rotating assembly.
+                Engine is 100% solid. Select Right Bank, Centerline, or Valvetrain to section internal components.
               </div>
             )}
 

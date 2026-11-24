@@ -43,7 +43,8 @@ export function calculateCoordinatedSpecs(
     selectedTrans,
     rearGear,
     tireDiameter,
-    selectedVehicle
+    selectedVehicle,
+    inductionDress = 'carb_hei'
   } = config;
 
   // 1. DISPLACEMENT & CYLINDER VOLUMES
@@ -102,7 +103,16 @@ export function calculateCoordinatedSpecs(
       : '0.0018" – 0.0025" (Hypereutectic Cast Alloy)';
 
   // 7. INDUCTION & AIRFLOW SIZING
-  const intake = INTAKE_MANIFOLDS.find(i => i.id === selectedIntake) || INTAKE_MANIFOLDS[0];
+  const baseIntake = INTAKE_MANIFOLDS.find(i => i.id === selectedIntake) || INTAKE_MANIFOLDS[0];
+  const isMpfi = inductionDress === 'mpfi_cnp';
+  const intake = isMpfi
+    ? {
+        ...baseIntake,
+        name: `${baseIntake.name} (MPFI + 90mm Throttle Body)`,
+        flowCfm: Math.max(baseIntake.flowCfm, 850)
+      }
+    : baseIntake;
+
   const peakCfmDemand = Math.round(((displacementCi * cam.hpRpm) / 3456) * cam.ve);
 
   // 8. LIVE DYNO CALCULATIONS & POWER CURVES
@@ -114,17 +124,21 @@ export function calculateCoordinatedSpecs(
 
   // AFR factor (12.9:1 optimal power rich)
   const afrFactor = Math.max(0.85, 1.0 - Math.pow(targetAFR - 12.9, 2) * 0.04);
-  const carbFactor = carbCfm >= peakCfmDemand ? 1.0 : 0.94;
+  const effectiveCfm = isMpfi ? Math.max(carbCfm, 850) : carbCfm;
+  const carbFactor = effectiveCfm >= peakCfmDemand ? 1.0 : 0.94;
+  const mpfiHpMult = isMpfi ? 1.06 : 1.0;
+  const mpfiTqMult = isMpfi ? 1.04 : 1.0;
 
   const dispPowerScale = Math.abs(displacementCi - 349.85) < 0.5 ? 1.0 : Math.pow(displacementCi / 349.85, 0.72);
-  const peakHp = Math.round(cam.baseHp * dispPowerScale * (staticCR / 9.90) * intake.hpMult * timingFactor * afrFactor * carbFactor);
-  const peakTq = Math.round(cam.baseTq * (displacementCi / 350.4) * intake.tqMult * timingFactor * afrFactor);
+  const peakHp = Math.round(cam.baseHp * dispPowerScale * (staticCR / 9.90) * intake.hpMult * mpfiHpMult * timingFactor * afrFactor * carbFactor);
+  const peakTq = Math.round(cam.baseTq * (displacementCi / 350.4) * intake.tqMult * mpfiTqMult * timingFactor * afrFactor);
 
-  const hpPeakRpm = cam.hpRpm;
-  const tqPeakRpm = cam.tqRpm;
+  const hpPeakRpm = isMpfi ? cam.hpRpm + 100 : cam.hpRpm;
+  const tqPeakRpm = isMpfi ? cam.tqRpm + 100 : cam.tqRpm;
 
   // Brake Specific Fuel Consumption (BSFC)
-  const bsfcLbHr = +(peakHp * 0.49).toFixed(1);
+  const bsfcFactor = isMpfi ? 0.47 : 0.49;
+  const bsfcLbHr = +(peakHp * bsfcFactor).toFixed(1);
   const fuelGph = +(bsfcLbHr / 6.0).toFixed(1);
 
   // Synthesize SAE J1349 Power & Torque Absorption Sweep (1500 to 6500 RPM)
@@ -135,8 +149,8 @@ export function calculateCoordinatedSpecs(
     const currTq = Math.round(peakTq * tqFactor);
     // Exact thermodynamic formula: HP = (Torque * RPM) / 5252
     const currHp = Math.round((currTq * r) / 5252);
-    const currVe = +(cam.ve * (0.8 + 0.2 * tqFactor)).toFixed(2);
-    const currFuelFlow = +(currHp * 0.49).toFixed(1);
+    const currVe = +(cam.ve * (0.8 + 0.2 * tqFactor) * (isMpfi ? 1.05 : 1.0)).toFixed(2);
+    const currFuelFlow = +(currHp * bsfcFactor).toFixed(1);
 
     dynoCurve.push({
       rpm: r,
@@ -171,7 +185,6 @@ export function calculateCoordinatedSpecs(
   const storeVehicle = STORE_VEHICLE_MODELS.find(v => v.id === selectedVehicle);
   const vehicle = VEHICLES_CATALOG[selectedVehicle] || VEHICLES_CATALOG.camaro1969;
   const tunnelClearance = storeVehicle ? `${storeVehicle.make} ${storeVehicle.model}: ${storeVehicle.tunnelSize}` : vehicle.tunnelSize;
-  const engineItem = ENGINE_CATALOG.sbc_350_ray;
 
   let isDirectBoltOn = false;
   let adapterRequired = "None (Direct Factory GM Bolt-On)";
