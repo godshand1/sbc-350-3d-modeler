@@ -6,9 +6,18 @@ Ray's 3D V8 Chevy small-block builder — 3D CAD engine workbench, transmission 
 - **Live v8:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v8/ — same app, Tab 09 drawings fixes + dyno falloff fix. v7 stays live at the root; v8 lives under `/v8/`.
 - **Live v9:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v9/ — the separate next version (Ray's word Nov 24). v7 and v8 stay live.
 - **Live v10:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v10/ — the new version (Ray's word Nov 24, "Use GitHub to launch it"). v7, v8 and v9 stay live.
+- **Live v11:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v11/ — built as-is at Ray's word Nov 24 ("Build as is"), from the v10 tree plus the delivered updates. v7, v8, v9 and v10 stay live.
 - **Baseline (Ray, confirmed):** 4.000" bore, 3.480" stroke, 5.700" rods, 9.025" deck height, 64cc chambers, .039" gasket with .015" deck clearance; 9.90:1 compression, 0.054" quench. All dimensions/specs are Gemini's from Ray's numbers — for Ray to true, as with the buoy.
 
-## v10 (current) — new version with cam-core spin fix (Nov 24, 2026)
+## v11 (current) — per-model wiring + Tab 10 Modification Studio (Nov 24, 2026)
+
+Ray's word Nov 24: "Build as is" — v11 is built from the v10 tree plus the two delivered code sets, while v7 stays live at the root and v8/v9/v10 stay live under their paths. The remixed AI Studio app was NOT used as the base (its code download was still running when Ray said build as is).
+
+- **Content:** v10 plus (1) PBR Phase 2 Batch 1 wiring from the Tabs4Pods audit chat — EngineConfig / EngineCatalogItem / StoreEngineSpec extended with model fields (engineId, engineName, configLabel, color, firingOrder, pattern, balance, flywheelTeeth, boreSpacing, valvetrainType, block/head material, valve sizes/angles, mainCaps), the catalog enriched per model (2JZ now I6/DOHC/7 mains), Section 10 compatibility now resolving the ACTIVE engine's pattern instead of hard-coding GM_Chevy_V8, preset handlers propagating color/firingOrder/pattern to the scene; (2) the Modification Studio Phase 1 mount from the Tabs4Pods playground chat — NEW Tab 10 "Engineering Config" with the 16-part per-part modification studio (factory values from existing data only, maker changes stored as Custom overrides with per-field Revert + per-part Reset to Factory), `partModifications.ts`, `partOverrides` lifted in App.tsx. Both sets were downloaded via their code-snippet Download buttons and grep-verified on disk; `types/engine.ts` and `App.tsx` were hand-merged (audit model fields + playground Part* types / partOverrides lift — neither file overwrote the other). The cam-core spin fix survives (`camCore.rotation.y`, line 1943). Typecheck: only the 2 pre-existing TabTechnicalDrawings errors from v10, nothing in the new/merged files.
+- **Not in v11:** Tab 11 More Drawings, the Matrix page (Tab 12), the multi-brand engine/vehicle catalog, the PBR geometry batches 2–4 (mechanicalGeometry / Engine3DScene / Transmission3DScene), and the evening evaluation's corrected code — none of those had come back as downloadable code when v11 was built; they land as the next version.
+- **Build:** source `ai-studio-app-v11/` (local, uncommitted, like v7–v10); built with `npm run build -- --base=/sbc-350-3d-modeler/v11/` (1,696 modules); published build in `v11/` (git tag `v11`).
+
+## v10 — new version with cam-core spin fix (Nov 24, 2026)
 
 Ray's word Nov 24: "Use GitHub to launch it" — v10 is launched on GitHub Pages as the new version, while v7 stays live at the root, v8 under `/v8/` and v9 under `/v9/`.
 
