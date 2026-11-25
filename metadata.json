@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Remix Remix SBC 350 3D Engine Builder",
+  "description": "Precision Chevrolet SBC 350 V8 engine builder and universal drivetrain simulator combining 3D CAD visualization, MODSIM kinematic simulation, 28-transmission compatibility matrix, full mechanics subsystem suite, and professional machine shop build sheet.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
