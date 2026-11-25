@@ -7,9 +7,19 @@ Ray's 3D V8 Chevy small-block builder — 3D CAD engine workbench, transmission 
 - **Live v9:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v9/ — the separate next version (Ray's word Nov 24). v7 and v8 stay live.
 - **Live v10:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v10/ — the new version (Ray's word Nov 24, "Use GitHub to launch it"). v7, v8 and v9 stay live.
 - **Live v11:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v11/ — built as-is at Ray's word Nov 24 ("Build as is"), from the v10 tree plus the delivered updates. v7, v8, v9 and v10 stay live.
+- **Live v12:** https://phoenixlightcomeshome.github.io/sbc-350-3d-modeler/v12/ — the remixed app Ray sent (02b764cb, remixed into Phoenix's account as 005ec037), pushed through GitHub at his word Nov 24. v7–v11 stay live.
 - **Baseline (Ray, confirmed):** 4.000" bore, 3.480" stroke, 5.700" rods, 9.025" deck height, 64cc chambers, .039" gasket with .015" deck clearance; 9.90:1 compression, 0.054" quench. All dimensions/specs are Gemini's from Ray's numbers — for Ray to true, as with the buoy.
 
-## v11 (current) — per-model wiring + Tab 10 Modification Studio (Nov 24, 2026)
+## v12 (current) — the remixed app, pushed through GitHub (Nov 24, 2026)
+
+Ray's word Nov 24: "This is the version I want to push through GitHub" (https://ai.studio/apps/02b764cb-9c85-4dcc-b0b9-39f344a57756, remixed into Phoenix's account as 005ec037). v12 is that app's code, downloaded from AI Studio as a ZIP (87 files, 9,873,477 bytes, md5 4bcbb3c6db73a098816f574f97ff1827), with three already-fixed bugs carried over so they don't come back — the remix was a parallel branch behind on fixes.
+
+- **Content:** 13 tabs — 00 CAD/CAM Design Studio, 01–09 as before, 10 Engineering Config (TabEngConfig with the BrandEngineSelector cascade), 11 More Drawings, 12 Drawing & MFG Matrix. The multi-brand library as real code: 96 engine families (US 39 + Asia 22 + Euro 18 + domestic diesel 17) and 68 vehicles, with the manufacturing matrix. Cinematic images ship in the build (copied by the vite plugin).
+- **Fixes carried over from v10/v11:** (1) cam-core spin — the remix still had `camCore.rotation.z` (tumbles end-over-end); now `rotation.y`, verified with the project's own three.js (shaft axis stays [0,0,1] through a full revolution); cam sprocket untouched. (2) Tab 09 — the remix's TabTechnicalDrawings + TechDrawingSpecsDrawer were the pre-fix v7 versions (same hook-order crash: hooks after an early `return null`; no dimension toggle); replaced wholesale with the v11 fixed files, plus the remix's "3D Part & MFG Matrix" button kept (onOpenMatrixForPart wired through). (3) Dyno — the remix loop still had the 0.45 torque floor (HP climbed after its peak); the corrected asymmetric-falloff + monotonic-guard math adapted to the remix's family-relative loop, verified in node on the baseline (385 HP @ 5,500, 363 @ 6,250, 343 @ 6,500; monotonic after peak; HP = TQ×RPM/5252 holds).
+- **Not in v12 (stays in v11):** the v11 per-model wiring (Batch 1 model fields + preset propagation) and the per-part Modification Studio — the remix has its own Tab 10 (TabEngConfig) and its own multi-family architecture, which those were not built against; porting them is a separate merge job. Typecheck: only the 2 pre-existing TabTechnicalDrawings errors from v10.
+- **Build:** source `ai-studio-app-v12/` (local, uncommitted, like v7–v11; node_modules is a symlink to v11's — same dependencies); built with `npm run build -- --base=/sbc-350-3d-modeler/v12/` (2,071 kB JS); published build in `v12/` (git tag `v12`).
+
+## v11 — per-model wiring + Tab 10 Modification Studio (Nov 24, 2026)
 
 Ray's word Nov 24: "Build as is" — v11 is built from the v10 tree plus the two delivered code sets, while v7 stays live at the root and v8/v9/v10 stay live under their paths. The remixed AI Studio app was NOT used as the base (its code download was still running when Ray said build as is).
 
