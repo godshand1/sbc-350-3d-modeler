@@ -1,0 +1,228 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  EngineConfig,
+  CoordinatedSpecs,
+  DynoDataPoint,
+  TransmissionItem
+} from '../types/engine';
+import { TRANSMISSIONS_DB } from '../data/engineData';
+
+const CUBIC_INCH_TO_CC = 16.387064;
+const BASELINE_DISPLACEMENT_CI = 349.8478;
+const BASELINE_PEAK_TQ = 414;
+const BASELINE_PEAK_HP = 385;
+const BASELINE_TQ_PEAK_RPM = 4000;
+const BASELINE_HP_PEAK_RPM = 5500;
+
+function readNum(obj: object, key: string, fallback: number): number {
+  const val = (obj as Record<string, unknown>)[key];
+  return typeof val === 'number' && Number.isFinite(val) ? val : fallback;
+}
+
+function readStr(obj: object, key: string, fallback: string): string {
+  const val = (obj as Record<string, unknown>)[key];
+  return typeof val === 'string' && val.length > 0 ? val : fallback;
+}
+
+export function calculateCoordinatedSpecs(config: EngineConfig): CoordinatedSpecs {
+  const bore = Number.isFinite(config.bore) && config.bore > 0 ? config.bore : 4.0;
+  const stroke = Number.isFinite(config.stroke) && config.stroke > 0 ? config.stroke : 3.48;
+  const rodLength =
+    Number.isFinite(config.rodLength) && config.rodLength > 0 ? config.rodLength : 5.7;
+  const deckHeight =
+    Number.isFinite(config.deckHeight) && config.deckHeight > 0 ? config.deckHeight : 9.025;
+  const deckClearance =
+    Number.isFinite(config.deckClearance) && config.deckClearance >= 0
+      ? config.deckClearance
+      : 0.015;
+  const gasketThickness =
+    Number.isFinite(config.gasketThickness) && config.gasketThickness > 0
+      ? config.gasketThickness
+      : 0.039;
+  const chamberCc =
+    Number.isFinite(config.chamberCc) && config.chamberCc > 0 ? config.chamberCc : 64;
+
+  // 1. Displacement & Rotating Kinematics
+  const cylSweptCi = (Math.PI / 4) * bore * bore * stroke;
+  const rawDisplacementCi = cylSweptCi * 8;
+  const displacementCi = Number(rawDisplacementCi.toFixed(1));
+  const displacementL = Number(((rawDisplacementCi * CUBIC_INCH_TO_CC) / 1000).toFixed(1));
+
+  const rodStrokeRatio = Number((rodLength / stroke).toFixed(2));
+  const crankThrow = stroke / 2;
+  const maxSin = Math.min(0.999, crankThrow / rodLength);
+  const maxRodAngleDeg = Number(((Math.asin(maxSin) * 180) / Math.PI).toFixed(1));
+
+  // 2. Quench, Deck & Compression Ratio (4.000" bore, 3.480" stroke, 64cc, .039" gasket, .015" deck -> 9.90:1 SCR, 0.054" quench)
+  const quenchDistance = Number((deckClearance + gasketThickness).toFixed(3));
+  const gasketBore = readNum(config, 'gasketBore', bore + 0.1);
+  const pistonValveReliefCc = readNum(config, 'pistonValveReliefCc', 5.0);
+
+  const sweptCc = cylSweptCi * CUBIC_INCH_TO_CC;
+  const gasketCc =
+    (Math.PI / 4) * gasketBore * gasketBore * gasketThickness * CUBIC_INCH_TO_CC;
+  const deckCc = (Math.PI / 4) * bore * bore * deckClearance * CUBIC_INCH_TO_CC;
+  const totalClearanceCc = Math.max(
+    1,
+    chamberCc + gasketCc + deckCc + pistonValveReliefCc
+  );
+
+  const staticCR = Number(((sweptCc + totalClearanceCc) / totalClearanceCc).toFixed(2));
+
+  // Dynamic compression ratio using intake valve closing angle (ABDC)
+  const intakeClosingAbdcDeg = readNum(config, 'intakeClosingAbdc', 60);
+  const ivcRad = (intakeClosingAbdcDeg * Math.PI) / 180;
+  const dynamicStrokeFactor = Math.max(
+    0.55,
+    Math.min(0.95, 0.5 * (1 + Math.cos(ivcRad)) + 0.08 * (crankThrow / rodLength))
+  );
+  const effectiveSweptCc = sweptCc * dynamicStrokeFactor;
+  const dynamicCR = Number(
+    ((effectiveSweptCc + totalClearanceCc) / totalClearanceCc).toFixed(2)
+  );
+
+  // 3. Valvetrain & Piston Ring Gaps
+  const camIntakeLift = readNum(config, 'camIntakeLift', 0.32);
+  const rockerRatio = readNum(config, 'rockerRatio', 1.5);
+  const totalValveLift = Number((camIntakeLift * rockerRatio).toFixed(3));
+
+  const topRingGap = Number((bore * 0.0045).toFixed(3));
+  const secondRingGap = Number((bore * 0.0055).toFixed(3));
+  const oilRingGap = 0.015;
+
+  // 4. Induction Dress, Cam & Airflow Modifiers
+  const inductionDress = readStr(config, 'inductionDress', 'carb_hei');
+  const isMpfi = inductionDress === 'mpfi_coils';
+  const intakeFlowCfm = readNum(config, 'headFlowCfm', 225);
+  const camDurationDeg = readNum(config, 'camDuration050', 224);
+
+  const dispRatio = rawDisplacementCi / BASELINE_DISPLACEMENT_CI;
+  const crBonus = 1 + (staticCR - 9.9) * 0.018;
+  const flowBonus = 1 + (intakeFlowCfm - 225) * 0.0014;
+  const dressTqMult = isMpfi ? 1.024 : 1.0;
+  const dressHpMult = isMpfi ? 1.031 : 1.0;
+
+  const tqPeakRpm = Math.round(
+    (BASELINE_TQ_PEAK_RPM + (camDurationDeg - 224) * 18) / 250
+  ) * 250;
+  const hpPeakRpm = Math.round(
+    (BASELINE_HP_PEAK_RPM + (camDurationDeg - 224) * 22 + (isMpfi ? 250 : 0)) / 250
+  ) * 250;
+
+  const peakTq = Math.round(
+    BASELINE_PEAK_TQ * dispRatio * crBonus * flowBonus * dressTqMult
+  );
+  const peakHp = Math.round(
+    BASELINE_PEAK_HP * dispRatio * crBonus * flowBonus * dressHpMult
+  );
+
+  // 5. Calibrated Dyno Curve (250-RPM steps, 1500..6500 RPM)
+  //    - No 0.5 torque floor so torque continues decaying past peak
+  //    - Preserves exact formula HP = round((TQ * RPM) / 5252)
+  //    - Monotonic guard ensures HP never rises after the HP peak while keeping TQ consistent
+  const dynoCurve: DynoDataPoint[] = [];
+  const hpSpan = Math.max(750, hpPeakRpm - tqPeakRpm);
+  const dropAtHpPeak = Math.max(
+    0.08,
+    Math.min(0.32, 1 - (peakHp * 5252) / (Math.max(1, peakTq) * hpPeakRpm))
+  );
+
+  let maxHpSoFar = 0;
+  let passedHpPeak = false;
+  let prevHp = 0;
+
+  for (let r = 1500; r <= 6500; r += 250) {
+    let tqFactor: number;
+    if (r <= tqPeakRpm) {
+      tqFactor = Math.max(0.25, 1 - Math.pow((tqPeakRpm - r) / 2500, 2) * 0.30);
+    } else {
+      tqFactor = Math.max(
+        0.05,
+        1 - Math.pow((r - tqPeakRpm) / hpSpan, 2.35) * dropAtHpPeak
+      );
+    }
+
+    let currTq = Math.round(peakTq * tqFactor);
+    let currHp = Math.round((currTq * r) / 5252);
+
+    if (r > hpPeakRpm || passedHpPeak) {
+      passedHpPeak = true;
+      if (currHp > prevHp) {
+        currTq = Math.round((prevHp * 5252) / r);
+        currHp = Math.round((currTq * r) / 5252);
+        while (currHp > prevHp && currTq > 0) {
+          currTq -= 1;
+          currHp = Math.round((currTq * r) / 5252);
+        }
+      }
+    } else if (currHp >= maxHpSoFar) {
+      maxHpSoFar = currHp;
+    } else {
+      passedHpPeak = true;
+    }
+
+    prevHp = currHp;
+    const ve = Math.round(tqFactor * 94 * (isMpfi ? 1.03 : 1.0));
+    const airflowCfm = Math.round((rawDisplacementCi * r * (ve / 100)) / 3456);
+    void ve;
+    void airflowCfm;
+
+    dynoCurve.push({
+      rpm: r,
+      hp: currHp,
+      tq: currTq
+    });
+  }
+
+  const resolvedPeakHpPoint = dynoCurve.reduce(
+    (best, pt) => (pt.hp > best.hp ? pt : best),
+    dynoCurve[0]
+  );
+  const resolvedPeakTqPoint = dynoCurve.reduce(
+    (best, pt) => (pt.tq > best.tq ? pt : best),
+    dynoCurve[0]
+  );
+
+  // 6. Transmission & Driveline Compatibility
+  const trans: TransmissionItem =
+    TRANSMISSIONS_DB[config.selectedTrans] || TRANSMISSIONS_DB.th350;
+  const nativePatternUpper = (trans.nativePattern || '').toUpperCase();
+  const isDirectBoltOn =
+    nativePatternUpper.includes('CHEVY') ||
+    nativePatternUpper.includes('GM') ||
+    nativePatternUpper.includes('BOP');
+
+  const bellhousing = isDirectBoltOn
+    ? 'Direct SBC / GM 6-Bolt Bellhousing Match'
+    : `Adapter Plate Required (${trans.nativePattern} to GM SBC)`;
+
+  return {
+    displacementCi,
+    displacementL,
+    rodStrokeRatio,
+    maxRodAngleDeg,
+    deckHeight,
+    quenchDistance,
+    staticCR,
+    dynamicCR,
+    totalValveLift,
+    topRingGap,
+    secondRingGap,
+    oilRingGap,
+    peakHp: resolvedPeakHpPoint.hp,
+    hpPeakRpm: resolvedPeakHpPoint.rpm,
+    peakTq: resolvedPeakTqPoint.tq,
+    tqPeakRpm: resolvedPeakTqPoint.rpm,
+    dynoCurve,
+    compatibility: {
+      isDirectBoltOn,
+      bellhousing
+    }
+  } as CoordinatedSpecs;
+}
+
+export const computeCoordinatedSpecs = calculateCoordinatedSpecs;
