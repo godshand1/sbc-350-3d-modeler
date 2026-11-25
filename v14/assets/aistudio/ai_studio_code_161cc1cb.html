@@ -1,0 +1,1653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>SBC 350 CAD/CAM Command Center | Professional Machinist & Dyno Suite</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            chevyOrange: '#ff4d00',
+            chevyDark: '#080a0d',
+            chevyPanel: '#10141a',
+            chevyCard: '#151b22',
+            chevyGold: '#ffb703',
+            cadCyan: '#00f0ff',
+            cadGreen: '#00ff66',
+            cadCrimson: '#ff0055',
+            holoViolet: '#9d4edd'
+          }
+        }
+      }
+    };
+  </script>
+
+  <!-- React 18 + Babel Standalone -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Three.js Core (r128) + Native OrbitControls -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+  <style>
+    html, body, #root {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      background-color: #080a0d;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .holo-grid {
+      background-size: 24px 24px;
+      background-image: 
+        linear-gradient(to right, rgba(0, 240, 255, 0.05) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(0, 240, 255, 0.05) 1px, transparent 1px);
+    }
+    .crt-glow {
+      background: linear-gradient(180deg, rgba(8,18,14,0.95) 0%, rgba(4,10,8,0.98) 100%);
+      box-shadow: inset 0 0 20px rgba(0, 255, 102, 0.15), 0 0 15px rgba(0, 240, 255, 0.1);
+    }
+    .flir-glow {
+      box-shadow: 0 0 25px rgba(255, 77, 0, 0.35);
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #080a0d; }
+    ::-webkit-scrollbar-thumb { background: #202936; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #ff4d00; }
+  </style>
+</head>
+<body class="text-gray-100 selection:bg-chevyOrange selection:text-white">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo } = React;
+
+    // =========================================================================
+    // 1. WEB AUDIO V8 EXHAUST SYNTHESIZER
+    // =========================================================================
+    class V8ExhaustAudioEngine {
+      constructor() {
+        this.ctx = null;
+        this.osc1 = null;
+        this.osc2 = null;
+        this.gain = null;
+        this.filter = null;
+        this.isPlaying = false;
+      }
+      start(rpm) {
+        if (!this.ctx) {
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          if (!AudioCtx) return;
+          this.ctx = new AudioCtx();
+        }
+        if (this.ctx.state === 'suspended') this.ctx.resume();
+        if (this.isPlaying) return;
+
+        this.gain = this.ctx.createGain();
+        this.gain.gain.value = 0.06;
+
+        this.filter = this.ctx.createBiquadFilter();
+        this.filter.type = 'lowpass';
+        this.filter.frequency.value = 400;
+
+        this.osc1 = this.ctx.createOscillator();
+        this.osc1.type = 'sawtooth';
+
+        this.osc2 = this.ctx.createOscillator();
+        this.osc2.type = 'triangle';
+
+        this.setRpm(rpm);
+
+        this.osc1.connect(this.filter);
+        this.osc2.connect(this.filter);
+        this.filter.connect(this.gain);
+        this.gain.connect(this.ctx.destination);
+
+        this.osc1.start();
+        this.osc2.start();
+        this.isPlaying = true;
+      }
+      setRpm(rpm) {
+        if (!this.isPlaying || !this.osc1 || !this.ctx) return;
+        const baseFreq = Math.max(18, (rpm / 60) * 4);
+        this.osc1.frequency.setValueAtTime(baseFreq, this.ctx.currentTime);
+        this.osc2.frequency.setValueAtTime(baseFreq * 0.5, this.ctx.currentTime);
+        if (this.filter) {
+          this.filter.frequency.setValueAtTime(Math.min(2200, baseFreq * 4.5 + 180), this.ctx.currentTime);
+        }
+      }
+      stop() {
+        if (!this.isPlaying) return;
+        try {
+          this.osc1.stop();
+          this.osc2.stop();
+          this.osc1.disconnect();
+          this.osc2.disconnect();
+        } catch(e) {}
+        this.isPlaying = false;
+      }
+    }
+
+    const v8Audio = new V8ExhaustAudioEngine();
+
+    // =========================================================================
+    // 2. CAD & CAM PRECISION REAL-WORLD DIMENSION DATABASE
+    // =========================================================================
+    const CAD_REAL_WORLD_SPECS = [
+      {
+        subsystem: "Engine Block Casting",
+        item: "Cylinder Bore Diameter",
+        dimension: "4.0000\"",
+        tolerance: "+0.0005\" / -0.0000\"",
+        metric: "101.600 mm",
+        notes: "4.400\" bore center spacing. Plateau hone with 280-grit then 400-grit (Ra 18-22 microinch) at 45° crosshatch."
+      },
+      {
+        subsystem: "Engine Block Casting",
+        item: "Blueprint Deck Height",
+        dimension: "9.0250\"",
+        tolerance: "±0.0010\"",
+        metric: "229.235 mm",
+        notes: "Measured crank center to deck. Surface milled to 30-50 Ra for Fel-Pro pre-flattened wire gasket."
+      },
+      {
+        subsystem: "Engine Block Casting",
+        item: "Main Bearing Tunnel ID",
+        dimension: "2.4490\" – 2.4495\"",
+        tolerance: "±0.0002\"",
+        metric: "62.205 mm",
+        notes: "Large journal 350 block. 4-bolt splayed main caps with 7/16-14 bolts torqued to 70 ft-lbs."
+      },
+      {
+        subsystem: "Crankshaft",
+        item: "Crankshaft Stroke",
+        dimension: "3.4800\"",
+        tolerance: "±0.0010\"",
+        metric: "88.392 mm",
+        notes: "Crank throw radius r = 1.7400\". Forged 4340 steel, counterweights drill-balanced to 1850g bobweight."
+      },
+      {
+        subsystem: "Crankshaft",
+        item: "Main & Rod Journal Diameters",
+        dimension: "2.449\" (Main) / 2.100\" (Rod)",
+        tolerance: "±0.0003\"",
+        metric: "62.20 mm / 53.34 mm",
+        notes: "Journals ground and micro-polished to 4-8 Ra finish. Target 0.0022\" - 0.0025\" oil clearance."
+      },
+      {
+        subsystem: "Connecting Rods",
+        item: "Rod Center-To-Center Length",
+        dimension: "5.7000\" (Ray's Spec)",
+        tolerance: "±0.0010\"",
+        metric: "144.780 mm",
+        notes: "Scat Forged 4340 H-Beam. 2.225\" big-end bore, 0.940\" width, 0.9272\" bronze pin bushing."
+      },
+      {
+        subsystem: "Connecting Rods",
+        item: "ARP Fastener Stretch Preload",
+        dimension: "0.0058\" – 0.0062\"",
+        tolerance: "Dial Indicator",
+        metric: "0.147 – 0.157 mm",
+        notes: "3/8-24 ARP 8740 cap bolts. Direct stretch gauge measurement (45 ft-lbs torque equivalent with ARP lube)."
+      },
+      {
+        subsystem: "Pistons & Rings",
+        item: "Compression Height & Skirt OD",
+        dimension: "1.560\" (CH) / 3.9960\" (Skirt)",
+        tolerance: "±0.0005\"",
+        metric: "39.62 mm / 101.498 mm",
+        notes: "Flat-top with -5.0cc 4-eyebrow reliefs. 0.015\" deck clearance (in-the-hole). 0.0040\" PTW clearance."
+      },
+      {
+        subsystem: "Pistons & Rings",
+        item: "Ring Lands & End Gaps",
+        dimension: "5/64\" Top / 5/64\" 2nd / 3/16\" Oil",
+        tolerance: "Gap: .020\" / .023\"",
+        metric: "1.98 mm / 1.98 mm / 4.76 mm",
+        notes: "Street/Strip: Top gap = 4.000 x .0050 = .020\"; 2nd gap = .023\" to prevent inter-ring flutter."
+      },
+      {
+        subsystem: "Cylinder Heads",
+        item: "Combustion Chamber Volume",
+        dimension: "64.0 cc (Ray's Spec)",
+        tolerance: "±0.5 cc",
+        metric: "64.0 ml",
+        notes: "Edelbrock E-Street aluminum. Yields exactly 9.90:1 Static CR with 0.054\" quench distance."
+      },
+      {
+        subsystem: "Cylinder Heads",
+        item: "Valve Diameters & Stems",
+        dimension: "2.020\" (Int) / 1.600\" (Exh)",
+        tolerance: "11/32\" Stem (.3415\")",
+        metric: "51.31 mm / 40.64 mm",
+        notes: "21-4N stainless steel valves, 4.910\" overall length, swirl-polished heads."
+      },
+      {
+        subsystem: "Valvetrain",
+        item: "Valve Springs Installed Spec",
+        dimension: "1.800\" @ 130 lbs / 1.250\" @ 340 lbs",
+        tolerance: "±0.015\"",
+        metric: "45.72 mm / 31.75 mm",
+        notes: "Dual springs with damper. Coil bind @ 1.150\" (0.100\" safety clearance @ 0.510\" net valve lift)."
+      },
+      {
+        subsystem: "Valvetrain",
+        item: "Pushrod & Rocker Geometry",
+        dimension: "7.800\" Length x 5/16\" OD",
+        tolerance: "1.50:1 Ratio",
+        metric: "198.12 mm x 7.94 mm",
+        notes: "Seamless chrome-moly tubular pushrods with ball ends. Billet roller rockers on 7/16\" screw-in studs."
+      },
+      {
+        subsystem: "Timing Set",
+        item: "Sprocket Ratio & Chain Pitch",
+        dimension: "20T Crank / 40T Cam (2:1)",
+        tolerance: "3/8\" Pitch Double Roller",
+        metric: "60.7 mm / 121.4 mm Pitch Dia",
+        notes: "Camshaft turns at exactly 1/2 crankshaft speed. 9-keyway adjustable lower crank sprocket."
+      },
+      {
+        subsystem: "Drivetrain Mating",
+        item: "Flywheel & Starter Pinion",
+        dimension: "153-T (12.75\") / 168-T (14.00\")",
+        tolerance: "Backlash: .035\"–.060\"",
+        metric: "323.8 mm / 355.6 mm OD",
+        notes: "153T uses straight starter bolts; 168T uses diagonal staggered bolts. Target 0.035\" mesh backlash."
+      },
+      {
+        subsystem: "Lubrication",
+        item: "Oil Pump Pickup To Pan",
+        dimension: "0.375\" (3/8\") Pan Floor Clr",
+        tolerance: "3/8\" to 1/2\"",
+        metric: "9.525 mm",
+        notes: "Gauged with modeling clay. Melling M55HV high-volume pump welded to pickup tube."
+      }
+    ];
+
+    const TRANSMISSIONS_DB = {
+      powerglide: { id: "powerglide", name: "GM Powerglide (2-Speed Drag Auto)", type: "Automatic", ratios: [1.76, 1.00], defaultStall: 3500 },
+      th350: { id: "th350", name: "Turbo-Hydramatic 350 (TH350 3-Speed Auto)", type: "Automatic", ratios: [2.52, 1.52, 1.00], defaultStall: 2400 },
+      th400: { id: "th400", name: "Turbo-Hydramatic 400 (TH400 3-Speed HD)", type: "Automatic", ratios: [2.48, 1.48, 1.00], defaultStall: 3000 },
+      r7004: { id: "r7004", name: "700R4 / Early 4L60 (4-Speed Overdrive)", type: "Automatic", ratios: [3.06, 1.63, 1.00, 0.70], defaultStall: 2200 },
+      r4l60e: { id: "r4l60e", name: "GM 4L60E (Electronic 4-Speed Overdrive)", type: "Automatic", ratios: [3.06, 1.63, 1.00, 0.70], defaultStall: 2400 },
+      muncieM20: { id: "muncieM20", name: "Muncie M20 Wide-Ratio (4-Speed Manual)", type: "Manual", ratios: [2.52, 1.88, 1.46, 1.00], defaultStall: 0 },
+      muncieM21: { id: "muncieM21", name: "Muncie M21 Close-Ratio (4-Speed Manual)", type: "Manual", ratios: [2.20, 1.64, 1.28, 1.00], defaultStall: 0 },
+      muncieM22: { id: "muncieM22", name: "Muncie M22 'Rock Crusher' (4-Speed Manual)", type: "Manual", ratios: [2.20, 1.64, 1.28, 1.00], defaultStall: 0 },
+      tremecT5: { id: "tremecT5", name: "Tremec T5 World-Class (5-Speed Manual OD)", type: "Manual", ratios: [2.95, 1.94, 1.34, 1.00, 0.63], defaultStall: 0 },
+      tremec_tkx: { id: "tremec_tkx", name: "Tremec TKX (Compact 5-Speed Manual 600 ft-lbs)", type: "Manual", ratios: [2.87, 1.89, 1.28, 1.00, 0.68], defaultStall: 0 },
+      tremecT56: { id: "tremecT56", name: "Tremec T56 Magnum (6-Speed Manual Double OD)", type: "Manual", ratios: [2.66, 1.78, 1.30, 1.00, 0.80, 0.63], defaultStall: 0 }
+    };
+
+    function setupUniversalOrbitControls(camera, domElement, targetVec = new THREE.Vector3(0, 1.0, 0)) {
+      if (typeof THREE.OrbitControls === 'function') {
+        try {
+          const ctrl = new THREE.OrbitControls(camera, domElement);
+          ctrl.enableDamping = true;
+          ctrl.dampingFactor = 0.05;
+          ctrl.target.copy(targetVec);
+          return ctrl;
+        } catch (e) {}
+      }
+      return { update: () => {}, dispose: () => {} };
+    }
+
+    // =========================================================================
+    // 3. MAIN REACT APP (CAD/CAM QUALITY & REAL-WORLD DIMENSIONS)
+    // =========================================================================
+    function SBC350App() {
+      const [activeTab, setActiveTab] = useState('cockpit3d');
+      // 'cockpit3d' | 'cadInspector' | 'dynoCell' | 'combustion' | 'egtDiagnostics' | 'leakdown' | 'modsim' | 'rotating' | 'trans' | 'aiCopilot' | 'shopBOM'
+
+      // Central Coordinated Engine Parameters (Ray's Confirmed Baseline)
+      const [bore, setBore] = useState(4.000);
+      const [stroke, setStroke] = useState(3.480);
+      const [rodLength, setRodLength] = useState(5.700);
+      const [deckHeight, setDeckHeight] = useState(9.025);
+      const [deckClearance, setDeckClearance] = useState(0.015);
+      const [gasketThickness, setGasketThickness] = useState(0.039);
+      const [chamberCc, setChamberCc] = useState(64.0);
+      const [pistonReliefCc, setPistonReliefCc] = useState(5.0);
+
+      // Valvetrain, Induction & Tuning
+      const [camProfile, setCamProfile] = useState('street');
+      const [rockerRatio, setRockerRatio] = useState(1.5);
+      const [selectedIntake, setSelectedIntake] = useState('dualplane_rpm');
+      const [carbCfm, setCarbCfm] = useState(650);
+      const [ignitionTiming, setIgnitionTiming] = useState(36);
+      const [targetAFR, setTargetAFR] = useState(12.9);
+
+      // Drivetrain & Vehicle
+      const [selectedTrans, setSelectedTrans] = useState('th350');
+      const [stallSpeed, setStallSpeed] = useState(2400);
+      const [rearGear, setRearGear] = useState(3.73);
+      const [tireDiameter, setTireDiameter] = useState(26.0);
+
+      // Dyno Weather Station (SAE J1349 Standard)
+      const [baroInHg, setBaroInHg] = useState(29.92);
+      const [dynoTempF, setDynoTempF] = useState(77.0);
+      const [relHumidity, setRelHumidity] = useState(45.0);
+      const [dynoSweepRate, setDynoSweepRate] = useState(600);
+      const [dynoRunning, setDynoRunning] = useState(false);
+      const [liveDynoRpm, setLiveDynoRpm] = useState(5600);
+
+      // CAD & CAM Display Modes
+      const [cadDimensionOverlay, setCadDimensionOverlay] = useState(true); // 3D In-Scene Calipers
+      const [flirThermalMode, setFlirThermalMode] = useState(false);
+      const [soundActive, setSoundActive] = useState(false);
+      const [hoopsEdges, setHoopsEdges] = useState(true);
+      const [cutawayMode, setCutawayMode] = useState('rightBank');
+      const [explodedAmount, setExplodedAmount] = useState(0);
+      const [isRunning, setIsRunning] = useState(false);
+      const [selectedPartSpec, setSelectedPartSpec] = useState(null);
+
+      // CAD Inspector Filter
+      const [cadSearchTerm, setCadSearchTerm] = useState('');
+
+      // AI Copilot Suite
+      const [aiDrawerOpen, setAiDrawerOpen] = useState(false);
+      const [aiQuery, setAiQuery] = useState('');
+      const [aiLoading, setAiLoading] = useState(false);
+      const [aiChatHistory, setAiChatHistory] = useState([
+        {
+          sender: 'ai',
+          text: "Master Machinist & CAD/CAM Copilot active. Complete real-world mechanic dimension database loaded for Ray's SBC 350 (4.0000\" Bore, 3.4800\" Stroke, 5.7000\" Rods, 9.0250\" Deck, 64.0cc Chambers, .0390\" Gasket, .0150\" Deck Clearance, 9.90:1 SCR, Quench .0540\"). All parts drawn to precision CAD standards with live dimension leader callouts."
+        }
+      ]);
+
+      const headerRef = useRef(null);
+      const [headerHeight, setHeaderHeight] = useState(140);
+
+      useEffect(() => {
+        if (headerRef.current) setHeaderHeight(headerRef.current.offsetHeight || 140);
+      }, []);
+
+      const toggleAudio = () => {
+        if (soundActive) {
+          v8Audio.stop();
+          setSoundActive(false);
+        } else {
+          v8Audio.start(liveDynoRpm);
+          setSoundActive(true);
+        }
+      };
+
+      useEffect(() => {
+        if (soundActive) v8Audio.setRpm(liveDynoRpm);
+      }, [liveDynoRpm, soundActive]);
+
+      // =======================================================================
+      // MODSIM MULTI-PHYSICS & SAE J1349 ENGINE
+      // =======================================================================
+      const testMath = useMemo(() => {
+        const displacementCi = +((Math.PI / 4) * Math.pow(bore, 2) * stroke * 8).toFixed(2);
+        const displacementL = +(displacementCi * 0.016387064).toFixed(3);
+        const singleCylinderCc = +((displacementCi * 16.387064) / 8).toFixed(2);
+
+        // Quench
+        const quenchDistance = +(gasketThickness + deckClearance).toFixed(4);
+
+        // Compression Ratios
+        const deckVolumeCc = +(((Math.PI / 4) * Math.pow(bore, 2) * deckClearance * 16.387064)).toFixed(2);
+        const gasketVolumeCc = +(((Math.PI / 4) * Math.pow(4.100, 2) * gasketThickness * 16.387064)).toFixed(2);
+        const totalClearanceCc = +(chamberCc + gasketVolumeCc + deckVolumeCc + pistonReliefCc).toFixed(2);
+        const staticCR = +((singleCylinderCc + totalClearanceCc) / totalClearanceCc).toFixed(2);
+
+        // Kinematics
+        const rodStrokeRatio = +(rodLength / stroke).toFixed(3);
+        const maxRodAngleDeg = +(Math.asin((stroke / 2) / rodLength) * (180 / Math.PI)).toFixed(2);
+        const meanPistonSpeed = Math.round((2 * stroke * liveDynoRpm) / 12);
+
+        // Cam Data
+        const camData = {
+          rv: { name: "RV / High-Torque Hydraulic", intakeDur050: 212, exhDur050: 218, lobeLift: 0.300, baseHp: 310, baseTq: 395, hpRpm: 4800, tqRpm: 3200, ve: 0.84, recStall: 1800, ivcDeg: 38 },
+          street: { name: "Street / Strip Hydraulic Roller (Ray's Spec)", intakeDur050: 224, exhDur050: 230, lobeLift: 0.340, baseHp: 385, baseTq: 415, hpRpm: 5600, tqRpm: 3800, ve: 0.90, recStall: 2400, ivcDeg: 44 },
+          radical: { name: "Radical Solid Roller", intakeDur050: 242, exhDur050: 248, lobeLift: 0.370, baseHp: 445, baseTq: 425, hpRpm: 6400, tqRpm: 4600, ve: 0.98, recStall: 3500, ivcDeg: 52 }
+        }[camProfile];
+
+        const totalValveLift = +(camData.lobeLift * rockerRatio).toFixed(3);
+        const effectiveStroke = stroke * (1 - (camData.ivcDeg / 180) * 0.45);
+        const dynamicCR = +(((Math.PI / 4) * Math.pow(bore, 2) * effectiveStroke * 16.387064 + totalClearanceCc) / totalClearanceCc).toFixed(2);
+
+        // SAE J1349 Atmospheric Correction Factor
+        const satVaporInHg = 0.0085 * Math.exp(0.033 * dynoTempF);
+        const vaporPressInHg = satVaporInHg * (relHumidity / 100);
+        const dryBaroInHg = Math.max(20, baroInHg - vaporPressInHg);
+        const tempK = (dynoTempF - 32) * (5 / 9) + 273.15;
+        const dryPressHpa = dryBaroInHg * 33.8639;
+        const saeCorrectionFactor = +(1.180 * ((990 / dryPressHpa) * Math.sqrt(tempK / 298)) - 0.180).toFixed(3);
+
+        // Power Output Model
+        const intakeMult = selectedIntake === 'tunnelram_dual' ? 1.12 : selectedIntake === 'singleplane_victor' ? 1.06 : 1.00;
+        const timingFactor = ignitionTiming === 36 ? 1.0 : ignitionTiming > 38 ? 0.92 : 1.0 - (36 - ignitionTiming) * 0.015;
+        const basePeakHp = Math.round(camData.baseHp * (staticCR / 9.90) * intakeMult * timingFactor);
+        const basePeakTq = Math.round(camData.baseTq * (displacementCi / 350.4) * (intakeMult === 1.12 ? 0.94 : 1.0) * timingFactor);
+
+        const correctedPeakHp = Math.round(basePeakHp * saeCorrectionFactor);
+        const correctedPeakTq = Math.round(basePeakTq * saeCorrectionFactor);
+
+        // Current Live Operating Point
+        const tqFactor = 1.0 - Math.pow((liveDynoRpm - camData.tqRpm) / 3200, 2) * 0.38;
+        const liveTorque = Math.max(120, Math.round(basePeakTq * tqFactor));
+        const liveBhp = Math.round((liveTorque * liveDynoRpm) / 5252);
+        const liveCorrectedBhp = Math.round(liveBhp * saeCorrectionFactor);
+        const liveBmep = +((150.8 * liveTorque) / displacementCi).toFixed(1);
+        const liveBsfc = +(0.46 + Math.pow((liveDynoRpm - 4200) / 4000, 2) * 0.08).toFixed(2);
+        const fuelFlowLbHr = +(liveBhp * liveBsfc).toFixed(1);
+        const fuelFlowGph = +(fuelFlowLbHr / 6.0).toFixed(1);
+
+        // Combustion & EGT
+        const peakCylPressurePsi = Math.round(180 + (liveBmep * 4.6));
+        const lppDegAtdc = 15;
+        const imepPsi = +(liveBmep * 1.12).toFixed(1);
+
+        const baseEgt = Math.round(1240 + (liveDynoRpm / 6000) * 80);
+        const egtChannels = [
+          { cyl: 1, temp: baseEgt - 15, afr: (targetAFR + 0.1).toFixed(1) },
+          { cyl: 2, temp: baseEgt - 10, afr: targetAFR.toFixed(1) },
+          { cyl: 3, temp: baseEgt + 28, afr: (targetAFR - 0.2).toFixed(1), siamese: true },
+          { cyl: 4, temp: baseEgt + 35, afr: (targetAFR - 0.2).toFixed(1), siamese: true },
+          { cyl: 5, temp: baseEgt + 32, afr: (targetAFR - 0.2).toFixed(1), siamese: true },
+          { cyl: 6, temp: baseEgt + 38, afr: (targetAFR - 0.2).toFixed(1), siamese: true },
+          { cyl: 7, temp: baseEgt - 12, afr: targetAFR.toFixed(1) },
+          { cyl: 8, temp: baseEgt - 18, afr: (targetAFR + 0.1).toFixed(1) }
+        ];
+
+        const crankingPsi = Math.round(14.7 * Math.pow(dynamicCR, 1.22));
+
+        return {
+          displacementCi,
+          displacementL,
+          quenchDistance,
+          staticCR,
+          dynamicCR,
+          rodStrokeRatio,
+          meanPistonSpeed,
+          camData,
+          totalValveLift,
+          saeCorrectionFactor,
+          correctedPeakHp,
+          correctedPeakTq,
+          liveBhp,
+          liveCorrectedBhp,
+          liveTorque,
+          liveBmep,
+          liveBsfc,
+          fuelFlowLbHr,
+          fuelFlowGph,
+          peakCylPressurePsi,
+          lppDegAtdc,
+          imepPsi,
+          egtChannels,
+          crankingPsi
+        };
+      }, [bore, stroke, rodLength, deckHeight, deckClearance, gasketThickness, chamberCc, pistonReliefCc, camProfile, rockerRatio, selectedIntake, carbCfm, ignitionTiming, targetAFR, baroInHg, dynoTempF, relHumidity, liveDynoRpm]);
+
+      // Automated Dyno Sweep Animation
+      useEffect(() => {
+        let timer;
+        if (dynoRunning) {
+          timer = setInterval(() => {
+            setLiveDynoRpm(prev => {
+              const step = Math.round(dynoSweepRate / 10);
+              if (prev >= 6500) {
+                setDynoRunning(false);
+                return 6500;
+              }
+              return Math.min(6500, prev + step);
+            });
+          }, 100);
+        }
+        return () => clearInterval(timer);
+      }, [dynoRunning, dynoSweepRate]);
+
+      // Dyno Run Points Table
+      const dynoTableData = useMemo(() => {
+        const rows = [];
+        for (let r = 2500; r <= 6500; r += 500) {
+          const tqMult = 1.0 - Math.pow((r - testMath.camData.tqRpm) / 3200, 2) * 0.38;
+          const tq = Math.round(testMath.correctedPeakTq * tqMult);
+          const hp = Math.round((tq * r) / 5252);
+          const corrHp = Math.round(hp * testMath.saeCorrectionFactor);
+          const bmep = +((150.8 * tq) / testMath.displacementCi).toFixed(1);
+          const bsfc = +(0.46 + Math.pow((r - 4200) / 4000, 2) * 0.08).toFixed(2);
+          const fuelGph = +((hp * bsfc) / 6.0).toFixed(1);
+          const egtAvg = Math.round(1240 + (r / 6000) * 80);
+          rows.push({ rpm: r, tq, hp, corrHp, bmep, bsfc, fuelGph, egtAvg });
+        }
+        return rows;
+      }, [testMath]);
+
+      // CSV Export
+      const exportDynoCSV = () => {
+        let csv = "RPM,Torque_lbft,BHP,SAE_Corr_HP,BMEP_psi,BSFC_lbhphr,Fuel_GPH,EGT_Avg_degF\n";
+        dynoTableData.forEach(r => {
+          csv += `${r.rpm},${r.tq},${r.hp},${r.corrHp},${r.bmep},${r.bsfc},${r.fuelGph},${r.egtAvg}\n`;
+        });
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `SBC_350_CAD_CAM_Dyno_Data_${Date.now()}.csv`;
+        a.click();
+      };
+
+      // AI Query Execution
+      const executeAiQuery = (queryText) => {
+        const q = (queryText || aiQuery).trim();
+        if (!q) return;
+
+        setAiChatHistory(prev => [...prev, { sender: 'user', text: q }]);
+        setAiQuery('');
+        setAiLoading(true);
+
+        setTimeout(() => {
+          const lq = q.toLowerCase();
+          let reply = "";
+
+          if (lq.includes("cad") || lq.includes("dimension") || lq.includes("machin") || lq.includes("tolerance")) {
+            reply = `CAD/CAM MACHINING SPECIFICATION SUMMARY:\n` +
+                    `• Block Deck Height: 9.0250" (±0.0010"). Milled to 30-50 Ra finish.\n` +
+                    `• Cylinder Bore: 4.0000" (+0.0005"/-0.0000") on 4.400" bore centers. Plateau honed 18-22 Ra at 45°.\n` +
+                    `• Crank Journals: Main 2.4490", Rod 2.0990". Micro-polished to 4-8 Ra with 0.0022" oil clearance.\n` +
+                    `• Rods: 5.7000" (±0.0010") C-to-C with ARP 3/8-24 rod bolts stretched to 0.0058"–0.0062".\n` +
+                    `• Valves: 2.020" intake / 1.600" exhaust with 11/32" stems at 1.800" installed height (130 lbs seat).`;
+          } else if (lq.includes("dyno") || lq.includes("bmep") || lq.includes("sae")) {
+            reply = `DYNO TELEMETRY ACQUISITION:\n` +
+                    `• Peak Torque: ${testMath.correctedPeakTq} FT-LBS @ ${testMath.camData.tqRpm} RPM (BMEP: ${testMath.liveBmep} PSI).\n` +
+                    `• Peak Power: ${testMath.correctedPeakHp} SAE Corrected BHP @ ${testMath.camData.hpRpm} RPM.\n` +
+                    `• Fuel Flow: ${testMath.fuelFlowGph} GPH @ WOT (BSFC = ${testMath.liveBsfc} lb/hp-hr).\n` +
+                    `• Weather Station: SAE J1349 CF = ${testMath.saeCorrectionFactor} under ${baroInHg}" Baro, ${dynoTempF}°F.`;
+          } else {
+            reply = `MACHINIST CAD COPILOT ANSWER FOR: "${q}"\n` +
+                    `• Ray's Confirmed Baseline: 4.000" Bore × 3.480" Stroke, 5.700" Rods, 9.025" Deck, 64cc Chambers, .039" Gasket, 9.90:1 SCR, Quench .054".\n` +
+                    `• Output: ${testMath.correctedPeakHp} BHP / ${testMath.correctedPeakTq} FT-LBS.\n` +
+                    `• Switch to Tab 2 ('CAD Blueprint') to inspect exact real-world dimensions and GD&T machining tolerances.`;
+          }
+
+          setAiChatHistory(prev => [...prev, { sender: 'ai', text: reply }]);
+          setAiLoading(false);
+        }, 300);
+      };
+
+      const handleAskAi = (chip) => {
+        setAiDrawerOpen(true);
+        executeAiQuery(chip);
+      };
+
+      // Filtered CAD Machinist Specs
+      const filteredCadSpecs = useMemo(() => {
+        if (!cadSearchTerm) return CAD_REAL_WORLD_SPECS;
+        const s = cadSearchTerm.toLowerCase();
+        return CAD_REAL_WORLD_SPECS.filter(item =>
+          item.subsystem.toLowerCase().includes(s) ||
+          item.item.toLowerCase().includes(s) ||
+          item.notes.toLowerCase().includes(s)
+        );
+      }, [cadSearchTerm]);
+
+      // Three.js References
+      const canvasContainerRef = useRef(null);
+      const cameraRef = useRef(null);
+      const controlsRef = useRef(null);
+
+      const setCameraPreset = (view) => {
+        if (!cameraRef.current || !controlsRef.current) return;
+        const cam = cameraRef.current;
+        if (view === 'iso') cam.position.set(18, 14, 22);
+        else if (view === 'front') cam.position.set(0, 2, 28);
+        else if (view === 'top') cam.position.set(0, 32, 0);
+        else if (view === 'right') cam.position.set(28, 2, 0);
+        cam.lookAt(0, 1.0, 0);
+        controlsRef.current.target.set(0, 1.0, 0);
+        controlsRef.current.update();
+      };
+
+      // =======================================================================
+      // REALISTIC 3D CAD KINEMATIC VIEWPORT WITH REAL DIMENSION LEADERS
+      // =======================================================================
+      useEffect(() => {
+        if (activeTab !== 'cockpit3d') return;
+        const container = canvasContainerRef.current;
+        if (!container) return;
+
+        const initialW = Math.max(container.clientWidth || 800, 320);
+        const initialH = Math.max(container.clientHeight || 500, 320);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(flirThermalMode ? 0x030206 : 0x080a0d);
+
+        let renderer;
+        try {
+          renderer = new THREE.WebGLRenderer({ antialias: true });
+        } catch (e) {
+          renderer = new THREE.WebGLRenderer({ antialias: false });
+        }
+        renderer.localClippingEnabled = true;
+        renderer.setSize(initialW, initialH);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        container.innerHTML = '';
+        container.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, flirThermalMode ? 0.4 : 0.85));
+        const dLight1 = new THREE.DirectionalLight(flirThermalMode ? 0xff4d00 : 0xffffff, flirThermalMode ? 1.5 : 1.2);
+        dLight1.position.set(20, 25, 20);
+        scene.add(dLight1);
+
+        const grid = new THREE.GridHelper(32, 32, flirThermalMode ? 0xff4d00 : 0x00f0ff, flirThermalMode ? 0x4a1500 : 0x141f2a);
+        grid.position.y = -5.5;
+        scene.add(grid);
+
+        const camera = new THREE.PerspectiveCamera(45, initialW / initialH, 0.1, 1000);
+        camera.position.set(18, 14, 22);
+        camera.lookAt(0, 1.0, 0);
+        cameraRef.current = camera;
+
+        const controls = setupUniversalOrbitControls(camera, renderer.domElement, new THREE.Vector3(0, 1.0, 0));
+        controlsRef.current = controls;
+
+        let activeClippingPlanes = [];
+        if (cutawayMode === 'rightBank') {
+          activeClippingPlanes = [new THREE.Plane(new THREE.Vector3(-1, -0.6, 0).normalize(), 0.8)];
+        } else if (cutawayMode === 'centerLongitudinal') {
+          activeClippingPlanes = [new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0.2)];
+        }
+
+        const edgeLineMat = new THREE.LineBasicMaterial({ 
+          color: flirThermalMode ? 0xffaa00 : 0x00f0ff, 
+          linewidth: 1.5 
+        });
+
+        const addEdges = (mesh) => {
+          if (!hoopsEdges) return;
+          try {
+            const edges = new THREE.EdgesGeometry(mesh.geometry);
+            mesh.add(new THREE.LineSegments(edges, edgeLineMat));
+          } catch(e) {}
+        };
+
+        const materials = flirThermalMode ? {
+          blockCasting: new THREE.MeshStandardMaterial({ color: 0x0077b6, emissive: 0x002244, roughness: 0.5, clippingPlanes: activeClippingPlanes }),
+          heads: new THREE.MeshStandardMaterial({ color: 0xffaa00, emissive: 0xaa4400, roughness: 0.3, clippingPlanes: activeClippingPlanes }),
+          headers: new THREE.MeshStandardMaterial({ color: 0xff3300, emissive: 0xff1100, roughness: 0.2 }),
+          crank: new THREE.MeshStandardMaterial({ color: 0x9d4edd, emissive: 0x3a0ca3, roughness: 0.2 }),
+          piston: new THREE.MeshStandardMaterial({ color: 0xff0055, emissive: 0x880022, roughness: 0.2 }),
+          rocker: new THREE.MeshStandardMaterial({ color: 0x00f0ff, emissive: 0x003366, roughness: 0.3 }),
+          valve: new THREE.MeshStandardMaterial({ color: 0xffaa00, emissive: 0x663300, roughness: 0.2 }),
+          spring: new THREE.MeshStandardMaterial({ color: 0xffb703, emissive: 0x442200, roughness: 0.3 }),
+          gears: new THREE.MeshStandardMaterial({ color: 0x00f0ff, emissive: 0x002244, roughness: 0.3 })
+        } : {
+          blockCasting: new THREE.MeshStandardMaterial({ color: 0xd83b01, roughness: 0.75, metalness: 0.18, clippingPlanes: activeClippingPlanes }),
+          heads: new THREE.MeshStandardMaterial({ color: 0xc4cbd2, roughness: 0.35, metalness: 0.65, clippingPlanes: activeClippingPlanes }),
+          headers: new THREE.MeshStandardMaterial({ color: 0x8a939e, roughness: 0.2, metalness: 0.85 }),
+          crank: new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.12, metalness: 0.95 }),
+          piston: new THREE.MeshStandardMaterial({ color: 0xd8dee4, roughness: 0.2, metalness: 0.8 }),
+          rocker: new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.25, metalness: 0.85 }),
+          valve: new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.15, metalness: 0.9 }),
+          spring: new THREE.MeshStandardMaterial({ color: 0xe5a823, roughness: 0.3, metalness: 0.85 }),
+          gears: new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.25, metalness: 0.85 })
+        };
+
+        const engineGroup = new THREE.Group();
+        const parts = {};
+
+        const boreRadius = (bore / 4.0) * 1.15;
+        const crankRadius = (stroke / 3.48) * (3.480 * 0.35);
+        const scaledRodLen = (rodLength / 5.70) * (5.700 * 0.35);
+
+        // 1. ENGINE BLOCK CASTING WITH MACHINED DECKS
+        const block = new THREE.Mesh(new THREE.BoxGeometry(6.4, 3.8, 12), materials.blockCasting);
+        block.position.y = -0.5;
+        block.userData = { 
+          name: "Cylinder Block Casting", 
+          spec: "9.0250\" Deck Height | 4.0000\" Bore (+.0005\"/-.0000\") | 4.400\" Bore Spacing | 2.449\" Main Journal Tunnel" 
+        };
+        addEdges(block);
+        engineGroup.add(block);
+        parts.block = block;
+
+        // 2. CRANKSHAFT WITH 90° CROSS-PLANE OFFSET THROWS & COUNTERWEIGHTS
+        const crankGroup = new THREE.Group();
+        crankGroup.position.set(0, -1.0, 0);
+
+        const mainSnout = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.7, 13.5, 20), materials.crank);
+        mainSnout.rotation.x = Math.PI / 2;
+        mainSnout.userData = { 
+          name: "Forged 4340 Crankshaft", 
+          spec: "3.4800\" Stroke (r=1.740\") | 2.449\" Main / 2.100\" Rod Pins | 1.250\" Snout | 3.58\" Flywheel Flange" 
+        };
+        crankGroup.add(mainSnout);
+
+        const crankPinOffsets = [0, Math.PI / 2, (3 * Math.PI) / 2, Math.PI];
+        const crankPins = [];
+
+        for (let j = 0; j < 4; j++) {
+          const pinZ = -4.5 + j * 3.0;
+          const pinAngle = crankPinOffsets[j];
+
+          const cwMesh = new THREE.Mesh(new THREE.CylinderGeometry(1.8, 1.8, 0.45, 16, 1, false, 0, Math.PI), materials.crank);
+          cwMesh.rotation.z = pinAngle + Math.PI;
+          cwMesh.rotation.x = Math.PI / 2;
+          cwMesh.position.set(0, 0, pinZ);
+          addEdges(cwMesh);
+          crankGroup.add(cwMesh);
+
+          const pinMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.48, 0.48, 1.1, 16), materials.crank);
+          pinMesh.rotation.x = Math.PI / 2;
+          pinMesh.position.set(Math.sin(pinAngle) * crankRadius, Math.cos(pinAngle) * crankRadius, pinZ);
+          crankGroup.add(pinMesh);
+
+          crankPins.push({ pinMesh, angle: pinAngle, z: pinZ });
+        }
+
+        // Timing Sprocket on Crank Snout
+        const crankSprocket = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.0, 0.4, 20), materials.gears);
+        crankSprocket.rotation.x = Math.PI / 2;
+        crankSprocket.position.set(0, 0, 6.9);
+        addEdges(crankSprocket);
+        crankGroup.add(crankSprocket);
+
+        engineGroup.add(crankGroup);
+        parts.crank = crankGroup;
+
+        // 3. CAMSHAFT & TIMING SPROCKET (1:2 REDUCTION)
+        const camGroup = new THREE.Group();
+        camGroup.position.set(0, 1.1, 0);
+
+        const camShaftCore = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.38, 12.0, 16), materials.crank);
+        camShaftCore.rotation.x = Math.PI / 2;
+        camShaftCore.userData = { 
+          name: "Hydraulic Roller Camshaft", 
+          spec: "0.340\" Lobe Lift | 224°/230° @ .050\" | 1:2 Gear Drive | 0.842\" Lifter Bores" 
+        };
+        camGroup.add(camShaftCore);
+
+        const camGear = new THREE.Mesh(new THREE.CylinderGeometry(2.0, 2.0, 0.4, 32), materials.gears);
+        camGear.rotation.x = Math.PI / 2;
+        camGear.position.set(0, 0, 6.9);
+        addEdges(camGear);
+        camGroup.add(camGear);
+
+        for (let c = 0; c < 16; c++) {
+          const lz = -5.0 + c * 0.65;
+          const lAngle = (c * Math.PI) / 4;
+          const lobe = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.42, 0.3, 12), materials.crank);
+          lobe.rotation.x = Math.PI / 2;
+          lobe.rotation.z = lAngle;
+          lobe.position.set(0, 0, lz);
+          camGroup.add(lobe);
+        }
+
+        engineGroup.add(camGroup);
+        parts.cam = camGroup;
+
+        // 4. FORGED H-BEAM 5.700" RODS & ARTICULATING FLAT-TOP PISTONS
+        const rotatingGroup = new THREE.Group();
+        const cylinderNodes = [];
+
+        for (let p = 0; p < 8; p++) {
+          const isRight = p % 2 === 0;
+          const bankSign = isRight ? 1 : -1;
+          const bankAngle = bankSign * (Math.PI / 4);
+          const cylIndex = Math.floor(p / 2);
+          const pinData = crankPins[cylIndex];
+
+          const cylGroup = new THREE.Group();
+          cylGroup.position.set(0, -1.0, pinData.z + (isRight ? -0.2 : 0.2));
+          cylGroup.rotation.z = -bankAngle;
+
+          // Forged H-Beam Rod (5.700" Spec)
+          const rodGroup = new THREE.Group();
+          const rodBeam = new THREE.Mesh(new THREE.BoxGeometry(0.38, scaledRodLen, 0.22), materials.crank);
+          rodBeam.position.y = scaledRodLen / 2;
+          rodBeam.userData = { 
+            name: `Scat Forged Rod #${p + 1}`, 
+            spec: "5.7000\" C-to-C (±.001\") | 2.225\" Big End | 0.9272\" Pin Bushing | 3/8-24 ARP Bolts (.0060\" stretch)" 
+          };
+          addEdges(rodBeam);
+          rodGroup.add(rodBeam);
+
+          const bigEnd = new THREE.Mesh(new THREE.CylinderGeometry(0.65, 0.65, 0.35, 16), materials.crank);
+          bigEnd.rotation.x = Math.PI / 2;
+          rodGroup.add(bigEnd);
+
+          cylGroup.add(rodGroup);
+
+          // 4.000" Flat-Top Piston
+          const pistonGroup = new THREE.Group();
+          const pistonCrown = new THREE.Mesh(new THREE.CylinderGeometry(boreRadius, boreRadius, 1.0, 24), materials.piston);
+          pistonCrown.userData = { 
+            name: `Keith Black Flat-Top Piston #${p + 1}`, 
+            spec: "4.0000\" Bore | 1.560\" Compression Height | -5.0cc Valve Relief | 0.015\" Deck Clearance | 0.0040\" PTW" 
+          };
+          addEdges(pistonCrown);
+          pistonGroup.add(pistonCrown);
+
+          const ringPack = new THREE.Mesh(new THREE.CylinderGeometry(boreRadius + 0.02, boreRadius + 0.02, 0.15, 24), materials.headers);
+          ringPack.position.y = 0.25;
+          pistonGroup.add(ringPack);
+
+          const pinMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 1.4, 16), materials.crank);
+          pinMesh.rotation.x = Math.PI / 2;
+          pistonGroup.add(pinMesh);
+
+          pistonGroup.position.y = scaledRodLen + crankRadius;
+          cylGroup.add(pistonGroup);
+
+          rotatingGroup.add(cylGroup);
+
+          cylinderNodes.push({
+            cylIndex: p + 1,
+            cylGroup,
+            rodGroup,
+            pistonGroup,
+            pinAngle: pinData.angle,
+            bankAngle,
+            bankSign
+          });
+        }
+
+        engineGroup.add(rotatingGroup);
+        parts.rotating = rotatingGroup;
+
+        // 5. 16 LIFTERS, PUSHRODS, ROCKERS & COMPRESSING SPRINGS
+        const valvetrainNodes = [];
+        const valvetrainGroup = new THREE.Group();
+
+        for (let v = 0; v < 16; v++) {
+          const lSide = v % 2 === 0 ? 1 : -1;
+          const vZ = -5.0 + v * 0.65;
+
+          const lifter = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.85, 12), materials.crank);
+          lifter.position.set(lSide * 0.6, 1.8, vZ);
+          valvetrainGroup.add(lifter);
+
+          const pushrod = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 2.7, 8), materials.crank);
+          pushrod.position.set(lSide * 1.4, 3.1, vZ);
+          pushrod.rotation.z = -lSide * 0.26;
+          valvetrainGroup.add(pushrod);
+
+          const rocker = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.35, 0.9), materials.rocker);
+          rocker.position.set(lSide * 2.2, 4.4, vZ);
+          rocker.userData = { 
+            name: `Roller Rocker Arm #${v + 1}`, 
+            spec: "1.50:1 Ratio Billet Aluminum | 7/16\" Stud Mount | Needle Bearing Trunnion" 
+          };
+          addEdges(rocker);
+          valvetrainGroup.add(rocker);
+
+          const valve = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.55, 2.2, 12), materials.valve);
+          valve.position.set(lSide * 2.5, 3.0, vZ);
+          valve.userData = { 
+            name: `Stainless Valve #${v + 1}`, 
+            spec: "2.020\" Intake / 1.600\" Exhaust | 11/32\" Stem (.3415\") | 4.910\" Overall Length" 
+          };
+          valvetrainGroup.add(valve);
+
+          const spring = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 1.2, 12), materials.spring);
+          spring.position.set(lSide * 2.5, 3.8, vZ);
+          spring.userData = { 
+            name: `Dual Valve Spring #${v + 1}`, 
+            spec: "1.800\" Installed Ht (130 lbs seat) | 1.250\" Open Ht (340 lbs) | 1.150\" Coil Bind" 
+          };
+          valvetrainGroup.add(spring);
+
+          valvetrainNodes.push({
+            lifter, pushrod, rocker, valve, spring,
+            baseLifterY: 1.8,
+            baseValveY: 3.0,
+            springBaseY: 3.8,
+            offset: v * 0.4
+          });
+        }
+
+        engineGroup.add(valvetrainGroup);
+        parts.valvetrain = valvetrainGroup;
+
+        // 6. HEADS, HEADERS, INTAKE & CARBURETOR
+        const headsGroup = new THREE.Group();
+        [-1, 1].forEach((side) => {
+          const head = new THREE.Mesh(new THREE.BoxGeometry(3.6, 2.6, 12.2), materials.heads);
+          head.position.set(side * 3.8, 3.2, 0);
+          head.rotation.z = side * (-Math.PI / 4);
+          head.userData = { 
+            name: "Edelbrock 64cc Aluminum Head", 
+            spec: "64.0 cc Chambers | 185cc Runner | 17x 7/16-14 Bolt Pattern (25-45-65 ft-lbs with PTFE)" 
+          };
+          addEdges(head);
+          headsGroup.add(head);
+
+          const vc = new THREE.Mesh(new THREE.BoxGeometry(2.8, 1.6, 11.6), materials.headers);
+          vc.position.y = 2.0;
+          head.add(vc);
+        });
+        engineGroup.add(headsGroup);
+        parts.heads = headsGroup;
+
+        const intake = new THREE.Mesh(new THREE.BoxGeometry(4.2, 2.0, 9.6), materials.heads);
+        intake.position.set(0, 3.4, 0);
+        addEdges(intake);
+        engineGroup.add(intake);
+
+        const carb = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.5, 2.8), materials.headers);
+        carb.position.set(0, 5.2, 0);
+        carb.userData = { name: "Holley 650 CFM Carburetor", spec: "650 CFM Flow | Dual Metering Blocks | 5.5-6.5 PSI Fuel" };
+        engineGroup.add(carb);
+
+        // 7. REAL-WORLD CAD DIMENSION LEADERS & WITNESS CALLOUTS
+        if (cadDimensionOverlay && !flirThermalMode) {
+          const pmiGroup = new THREE.Group();
+          const cyanLeaderMat = new THREE.LineBasicMaterial({ color: 0x00f0ff, linewidth: 2 });
+          const goldLeaderMat = new THREE.LineBasicMaterial({ color: 0xffb703, linewidth: 2 });
+
+          // 9.025" Deck Height Dimension Callout with witness lines
+          const deckLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(-4.8, -1.0, 0),
+            new THREE.Vector3(-4.8, 2.8, 0)
+          ]), cyanLeaderMat);
+          pmiGroup.add(deckLine);
+
+          // 5.700" Rod Length Dimension Callout
+          const rodLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(4.8, 0, 0),
+            new THREE.Vector3(4.8, scaledRodLen, 0)
+          ]), goldLeaderMat);
+          pmiGroup.add(rodLine);
+
+          // 4.000" Bore Diameter Witness Line
+          const boreLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(-1.8 - boreRadius, 3.0, 2.0),
+            new THREE.Vector3(-1.8 + boreRadius, 3.0, 2.0)
+          ]), cyanLeaderMat);
+          pmiGroup.add(boreLine);
+
+          engineGroup.add(pmiGroup);
+        }
+
+        scene.add(engineGroup);
+        renderer.render(scene, camera);
+
+        // Raycasting for interactive HUD inspect
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const onCanvasClick = (e) => {
+          const rect = renderer.domElement.getBoundingClientRect();
+          mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(mouse, camera);
+          const hits = raycaster.intersectObjects(engineGroup.children, true);
+          if (hits.length > 0) {
+            let obj = hits[0].object;
+            while (obj.parent && obj.parent !== engineGroup) {
+              if (obj.userData && obj.userData.name) break;
+              obj = obj.parent;
+            }
+            if (obj.userData && obj.userData.name) {
+              setSelectedPartSpec(obj.userData);
+            }
+          }
+        };
+        renderer.domElement.addEventListener('click', onCanvasClick);
+
+        let animId;
+        let lastTime = performance.now();
+        let currentCrankAngle = 0;
+
+        const animate = (now) => {
+          animId = requestAnimationFrame(animate);
+          const dt = Math.min((now - lastTime) / 1000, 0.1);
+          lastTime = now;
+
+          if (controls.update) controls.update();
+
+          const f = explodedAmount;
+          if (parts.heads) {
+            parts.heads.children[0].position.set(-3.8 - f * 4.5, 3.2 + f * 4.5, 0);
+            parts.heads.children[1].position.set(3.8 + f * 4.5, 3.2 + f * 4.5, 0);
+          }
+
+          // KINEMATICS ANIMATION LOOP
+          if (isRunning) {
+            const radPerSec = (liveDynoRpm / 60) * 2 * Math.PI;
+            currentCrankAngle += radPerSec * dt;
+
+            if (parts.crank) parts.crank.rotation.z = currentCrankAngle;
+            if (parts.cam) parts.cam.rotation.z = -currentCrankAngle / 2;
+
+            // Slider-Crank Planar 2-Link Motion
+            cylinderNodes.forEach((node) => {
+              const alpha = currentCrankAngle + node.pinAngle - node.bankAngle;
+              const sinBeta = (crankRadius / scaledRodLen) * Math.sin(alpha);
+              const beta = Math.asin(sinBeta);
+              const yPiston = (crankRadius * Math.cos(alpha)) + (scaledRodLen * Math.cos(beta));
+
+              node.pistonGroup.position.y = yPiston;
+
+              const pinX = crankRadius * Math.sin(alpha);
+              const pinY = crankRadius * Math.cos(alpha);
+              node.rodGroup.position.set(pinX, pinY, 0);
+              node.rodGroup.rotation.z = -beta;
+            });
+
+            // Valvetrain Reciprocation & Spring Compression
+            valvetrainNodes.forEach((v) => {
+              const pulse = Math.max(0, Math.sin((currentCrankAngle / 2) + v.offset));
+              const liftDist = pulse * 0.28;
+              v.lifter.position.y = v.baseLifterY + liftDist;
+              v.rocker.rotation.z = -pulse * 0.18;
+              v.valve.position.y = v.baseValveY - liftDist;
+              v.spring.scale.y = Math.max(0.65, 1.0 - (liftDist / 1.2));
+            });
+          }
+
+          renderer.render(scene, camera);
+        };
+        animate(performance.now());
+
+        return () => {
+          cancelAnimationFrame(animId);
+          if (renderer.domElement) renderer.domElement.removeEventListener('click', onCanvasClick);
+          renderer.dispose();
+        };
+      }, [activeTab, flirThermalMode, hoopsEdges, cadDimensionOverlay, cutawayMode, isRunning, liveDynoRpm, explodedAmount, bore, stroke, rodLength]);
+
+      return (
+        <div className="w-full min-h-screen flex flex-col bg-chevyDark text-gray-200">
+          
+          {/* TOP MASTER PROFESSIONAL TELEMETRY BAR */}
+          <header ref={headerRef} className="flex-shrink-0 bg-chevyPanel border-b border-gray-800 px-3 py-2 flex flex-col gap-2 z-20 shadow-2xl">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-9 h-9 rounded bg-chevyOrange flex items-center justify-center font-black text-sm text-white shadow-lg">
+                  350
+                </div>
+                <div>
+                  <h1 className="font-bold text-sm tracking-wide text-white flex items-center gap-1.5">
+                    SBC 350 COMMAND CENTER <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-500/20 text-cadCyan border border-cadCyan/40 font-mono">CAD & CAM QUALITY ENGINE</span>
+                  </h1>
+                  <p className="text-[10px] text-gray-400 font-mono">
+                    Ray's Baseline: 5.700" Rods | 9.025" Deck | 64cc Heads | .039" Gasket | .015" Deck Clr | Quench .054" | SCR 9.90:1
+                  </p>
+                </div>
+              </div>
+
+              {/* NAVIGATION TABS */}
+              <nav className="flex space-x-1 overflow-x-auto max-w-full">
+                {[
+                  { id: 'cockpit3d', label: '1. Moving Holo-CAD', icon: '⚙️' },
+                  { id: 'cadInspector', label: '2. CAD Blueprint', icon: '📐' },
+                  { id: 'dynoCell', label: '3. SuperFlow Dyno Cell', icon: '📊' },
+                  { id: 'combustion', label: '4. In-Cylinder P-V', icon: '⚡' },
+                  { id: 'egtDiagnostics', label: '5. 8-Ch EGT Telemetry', icon: '🔥' },
+                  { id: 'leakdown', label: '6. Leakdown Bench', icon: '🔬' },
+                  { id: 'modsim', label: '7. MODSIM Multi-Physics', icon: '🔄' },
+                  { id: 'rotating', label: '8. Rotating & Quench', icon: '🧱' },
+                  { id: 'trans', label: '9. Trans Matrix (28)', icon: '🏎️' },
+                  { id: 'aiCopilot', label: '10. Neural AI Copilot', icon: '🤖' }
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`px-2.5 py-1 rounded text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1 ${
+                      activeTab === tab.id
+                        ? 'bg-chevyOrange text-white shadow-lg'
+                        : tab.id === 'cadInspector'
+                        ? 'text-cadCyan bg-cyan-950/40 border border-cadCyan/40'
+                        : tab.id === 'dynoCell'
+                        ? 'text-cadGreen bg-emerald-950/40 border border-cadGreen/40'
+                        : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                    }`}
+                  >
+                    <span>{tab.icon}</span>
+                    <span>{tab.label}</span>
+                  </button>
+                ))}
+              </nav>
+            </div>
+
+            {/* LIVE DIGITAL INSTRUMENT HUD */}
+            <div className="bg-black/80 p-2 rounded-lg border border-gray-800/80 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+              <div className="flex flex-wrap items-center gap-4">
+                <div><span className="text-gray-400">RPM:</span> <span className="text-cadCyan font-bold">{liveDynoRpm}</span></div>
+                <div><span className="text-gray-400">SAE BHP:</span> <span className="text-cadGreen font-bold text-sm">{testMath.liveCorrectedBhp} HP</span></div>
+                <div><span className="text-gray-400">TORQUE:</span> <span className="text-chevyGold font-bold text-sm">{testMath.liveTorque} FT-LBS</span></div>
+                <div><span className="text-gray-400">BMEP:</span> <span className="text-white font-bold">{testMath.liveBmep} PSI</span></div>
+                <div><span className="text-gray-400">BSFC:</span> <span className="text-cadGreen font-bold">{testMath.liveBsfc}</span></div>
+                <div><span className="text-gray-400">Pmax:</span> <span className="text-cadCyan font-bold">{testMath.peakCylPressurePsi} PSI</span></div>
+                <div><span className="text-gray-400">QUENCH:</span> <span className="text-emerald-400 font-bold">{testMath.quenchDistance}"</span></div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={toggleAudio}
+                  className={`px-2.5 py-0.5 rounded text-[11px] font-bold border flex items-center gap-1 ${
+                    soundActive ? 'bg-red-600 border-red-400 text-white animate-pulse' : 'bg-black/60 border-gray-700 text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <span>🔊</span>
+                  <span>{soundActive ? 'V8 Sound ON' : 'Synth Audio'}</span>
+                </button>
+                <button
+                  onClick={exportDynoCSV}
+                  className="px-2.5 py-0.5 rounded text-[11px] font-bold border border-emerald-500 bg-emerald-900/40 text-emerald-300 hover:bg-emerald-600 hover:text-white flex items-center gap-1 shadow"
+                >
+                  <span>💾</span>
+                  <span>CSV Export</span>
+                </button>
+                <button
+                  onClick={() => setAiDrawerOpen(true)}
+                  className="px-2.5 py-0.5 rounded text-[11px] font-bold border border-purple-500 bg-purple-900/40 text-purple-300 hover:bg-purple-600 hover:text-white flex items-center gap-1 shadow"
+                >
+                  <span>🤖</span>
+                  <span>Copilot</span>
+                </button>
+              </div>
+            </div>
+          </header>
+
+          {/* MAIN WORKSPACE */}
+          <main className="flex-1 w-full relative">
+            
+            {/* TAB 1: 3D HOLOGRAPHIC CAD VIEWPORT WITH MOVING KINEMATICS & CALLOUTS */}
+            {activeTab === 'cockpit3d' && (
+              <div style={{ position: 'relative', width: '100%', height: `calc(100vh - ${headerHeight}px)`, minHeight: '480px' }} className="overflow-hidden holo-grid">
+                <div ref={canvasContainerRef} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', touchAction: 'none' }} className="cursor-grab active:cursor-grabbing" />
+
+                {/* Top-Left CAD Controls */}
+                <div className="absolute top-3 left-3 z-10 flex flex-col gap-2 max-w-[calc(100%-24px)] text-xs font-mono">
+                  <div className="flex flex-wrap items-center gap-1 bg-chevyPanel/95 border border-cyan-500/50 p-1.5 rounded-lg shadow-xl backdrop-blur-md">
+                    <span className="text-[10px] text-cadCyan font-bold px-1 uppercase">VIEWCUBE:</span>
+                    {['iso', 'front', 'top', 'right'].map((v) => (
+                      <button key={v} onClick={() => setCameraPreset(v)} className="px-2 py-0.5 rounded bg-black/60 text-gray-300 hover:text-white uppercase text-[10px] font-bold">
+                        {v}
+                      </button>
+                    ))}
+                    <div className="h-3 w-px bg-gray-700 mx-1"></div>
+                    <button
+                      onClick={() => setCadDimensionOverlay(!cadDimensionOverlay)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold border flex items-center gap-1 ${
+                        cadDimensionOverlay ? 'bg-cyan-500/30 text-cadCyan border-cadCyan' : 'bg-black/60 border-gray-700 text-gray-400'
+                      }`}
+                    >
+                      <span>📏</span>
+                      <span>CAD Calipers</span>
+                    </button>
+                    <button
+                      onClick={() => setFlirThermalMode(!flirThermalMode)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold border flex items-center gap-1 ${
+                        flirThermalMode ? 'bg-gradient-to-r from-red-600 to-orange-500 text-white border-yellow-400 flir-glow' : 'bg-black/60 border-gray-700 text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      <span>🌡️</span>
+                      <span>FLIR</span>
+                    </button>
+                    <button
+                      onClick={() => setHoopsEdges(!hoopsEdges)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold ${hoopsEdges ? 'bg-cadCyan text-black' : 'text-gray-400'}`}
+                    >
+                      CAD Edges
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      onClick={() => setIsRunning(!isRunning)}
+                      className={`px-3 py-1 font-bold rounded shadow-xl border flex items-center gap-1.5 ${
+                        isRunning ? 'bg-emerald-600 border-emerald-400 text-white animate-pulse' : 'bg-chevyPanel border-gray-700 text-gray-300'
+                      }`}
+                    >
+                      <span>{isRunning ? '⏹ STOP KINEMATICS' : '▶ RUN MOVING PARTS'}</span>
+                    </button>
+                    <button
+                      onClick={() => handleAskAi("Explain the CAD real-world dimensions: 4.000 bore, 3.480 stroke, 5.700 rod length, 9.025 deck, and .054 quench")}
+                      className="px-2.5 py-1 text-xs font-bold rounded bg-purple-900/40 border border-purple-500/60 text-purple-300 hover:bg-purple-600 hover:text-white flex items-center gap-1"
+                    >
+                      <span>💡</span>
+                      <span>Ask AI About Dimensions</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Exploded Disassembly Slider */}
+                <div className="absolute bottom-4 left-4 right-4 sm:right-auto sm:w-96 z-10 bg-chevyPanel/95 backdrop-blur border border-gray-700 rounded-xl p-3 shadow-2xl space-y-2">
+                  <div className="flex items-center justify-between border-b border-gray-700 pb-1.5 font-mono">
+                    <span className="text-[11px] font-bold tracking-wider text-gray-300">EXPLODED DISASSEMBLY</span>
+                    <span className="text-xs text-chevyOrange font-bold">{Math.round(explodedAmount * 100)}%</span>
+                  </div>
+                  <input
+                    type="range" min="0" max="1" step="0.01"
+                    value={explodedAmount}
+                    onChange={(e) => setExplodedAmount(parseFloat(e.target.value))}
+                    className="w-full accent-chevyOrange cursor-pointer h-2"
+                  />
+                  <div className="flex items-center justify-between text-xs pt-1 font-mono">
+                    <span className="text-gray-400">Kinematic Speed:</span>
+                    <span className="font-mono text-chevyGold font-bold">{liveDynoRpm} RPM</span>
+                  </div>
+                  <input
+                    type="range" min="600" max="6500" step="50"
+                    value={liveDynoRpm}
+                    onChange={(e) => setLiveDynoRpm(parseInt(e.target.value))}
+                    className="w-full accent-chevyGold cursor-pointer h-2"
+                  />
+                </div>
+
+                {/* Live Real-World CAD Dimension Callouts */}
+                {cadDimensionOverlay && !flirThermalMode && (
+                  <div className="absolute top-16 right-3 z-10 flex flex-col gap-1.5 font-mono text-[11px]">
+                    <div className="px-2.5 py-1 rounded bg-black/85 border border-cadCyan text-cadCyan shadow-lg backdrop-blur">
+                      CAD: DECK HEIGHT = 9.0250" (±.0010") [229.23 mm]
+                    </div>
+                    <div className="px-2.5 py-1 rounded bg-black/85 border border-chevyGold text-chevyGold shadow-lg backdrop-blur">
+                      CAD: ROD C-TO-C = 5.7000" (±.0010") [144.78 mm]
+                    </div>
+                    <div className="px-2.5 py-1 rounded bg-black/85 border border-cadGreen text-cadGreen shadow-lg backdrop-blur">
+                      CAD: BORE DIA = 4.0000" (+.0005"/-.0000") [101.60 mm]
+                    </div>
+                    <div className="px-2.5 py-1 rounded bg-black/85 border border-purple-400 text-purple-300 shadow-lg backdrop-blur">
+                      CAD: SQUISH QUENCH = 0.0540" (.039" + .015") [1.37 mm]
+                    </div>
+                  </div>
+                )}
+
+                {/* Clicked Part CAD Blueprint Inspector Modal */}
+                {selectedPartSpec && (
+                  <div className="absolute bottom-24 right-4 z-20 bg-chevyPanel/95 border-2 border-cadCyan rounded-xl p-4 shadow-2xl max-w-sm backdrop-blur-md font-mono text-xs">
+                    <div className="flex justify-between items-start border-b border-gray-700 pb-2">
+                      <span className="font-black text-cadCyan uppercase tracking-wider">{selectedPartSpec.name}</span>
+                      <button onClick={() => setSelectedPartSpec(null)} className="text-gray-400 hover:text-white font-bold ml-2">✕</button>
+                    </div>
+                    <p className="text-gray-300 mt-2 leading-relaxed">{selectedPartSpec.spec || selectedPartSpec.desc}</p>
+                    <button
+                      onClick={() => handleAskAi(`Provide detailed CAD/CAM machining blueprint tolerances for: ${selectedPartSpec.name}`)}
+                      className="mt-3 w-full py-1.5 bg-purple-900/40 border border-purple-500/60 rounded text-[11px] text-purple-300 font-bold hover:bg-purple-600 hover:text-white"
+                    >
+                      Ask AI Machinist About Tolerances
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 2: DEDICATED CAD & CAM BLUEPRINT INSPECTOR */}
+            {activeTab === 'cadInspector' && (
+              <div className="p-4 sm:p-6 max-w-7xl mx-auto w-full space-y-5 font-mono text-xs">
+                <div className="flex flex-wrap justify-between items-center pb-2 border-b border-gray-800 gap-2">
+                  <div>
+                    <h2 className="text-base font-bold text-white uppercase tracking-wider font-sans flex items-center gap-2">
+                      <span>📐</span>
+                      <span>CAD & CAM BLUEPRINT SPECIFICATIONS & REAL-WORLD DIMENSIONS</span>
+                    </h2>
+                    <p className="text-gray-400 mt-0.5">Top-of-the-line real sizes, tolerances, GD&T symbols, and machining processes from real-world mechanics.</p>
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Search component dimension..."
+                    value={cadSearchTerm}
+                    onChange={e => setCadSearchTerm(e.target.value)}
+                    className="bg-black/60 border border-gray-700 rounded px-2.5 py-1 text-xs text-white"
+                  />
+                </div>
+
+                <div className="bg-chevyPanel rounded-xl border border-gray-800 p-4 space-y-3">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-[11px] font-mono">
+                      <thead className="bg-black/60 text-gray-400 sticky top-0">
+                        <tr>
+                          <th className="p-2">SUBSYSTEM</th>
+                          <th className="p-2">ENGINEERING ITEM</th>
+                          <th className="p-2 text-cadCyan">IMPERIAL SIZE</th>
+                          <th className="p-2 text-chevyGold">TOLERANCE</th>
+                          <th className="p-2">METRIC (MM)</th>
+                          <th className="p-2">MACHINIST NOTES & PROCESS</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-800">
+                        {filteredCadSpecs.map((item, idx) => (
+                          <tr key={idx} className="hover:bg-chevyCard/60 transition-colors">
+                            <td className="p-2 text-gray-400 font-bold">{item.subsystem}</td>
+                            <td className="p-2 text-white font-bold">{item.item}</td>
+                            <td className="p-2 text-cadCyan font-black">{item.dimension}</td>
+                            <td className="p-2 text-chevyGold font-bold">{item.tolerance}</td>
+                            <td className="p-2 text-gray-300">{item.metric}</td>
+                            <td className="p-2 text-gray-300 text-[10px]">{item.notes}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 3: AUTOMATED WATER-BRAKE DYNO (SUPERFLOW / AVL STANDARD) */}
+            {activeTab === 'dynoCell' && (
+              <div className="p-4 sm:p-6 max-w-7xl mx-auto w-full space-y-5 font-mono text-xs">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 bg-chevyPanel p-3.5 rounded-xl border border-gray-800">
+                  <div className="space-y-1">
+                    <span className="text-[10px] text-gray-400 uppercase font-bold">SAE J1349 BARO STATION</span>
+                    <div className="flex items-center justify-between">
+                      <span className="text-white font-bold">Barometer:</span>
+                      <input type="number" step="0.05" value={baroInHg} onChange={e => setBaroInHg(parseFloat(e.target.value))} className="w-18 bg-black/60 border border-gray-700 rounded px-1.5 py-0.5 text-right text-cadCyan" />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-white font-bold">Cell Temp (°F):</span>
+                      <input type="number" step="1" value={dynoTempF} onChange={e => setDynoTempF(parseFloat(e.target.value))} className="w-18 bg-black/60 border border-gray-700 rounded px-1.5 py-0.5 text-right text-chevyGold" />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <span className="text-[10px] text-gray-400 uppercase font-bold">CORRECTION CALCULATION</span>
+                    <div className="flex items-center justify-between">
+                      <span className="text-white font-bold">Rel Humidity:</span>
+                      <input type="number" step="5" value={relHumidity} onChange={e => setRelHumidity(parseFloat(e.target.value))} className="w-18 bg-black/60 border border-gray-700 rounded px-1.5 py-0.5 text-right text-cadCyan" />
+                    </div>
+                    <div className="flex items-center justify-between pt-1">
+                      <span className="text-gray-400">SAE CF:</span>
+                      <span className="text-cadGreen font-bold">{testMath.saeCorrectionFactor}</span>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <span className="text-[10px] text-gray-400 uppercase font-bold">SWEEP CONTROL RATE</span>
+                    <div className="flex gap-1.5 pt-1">
+                      {[300, 600].map(rate => (
+                        <button
+                          key={rate}
+                          onClick={() => setDynoSweepRate(rate)}
+                          className={`flex-1 py-1 rounded text-[10px] font-bold border ${dynoSweepRate === rate ? 'bg-cadCyan text-black border-cadCyan' : 'bg-black/60 border-gray-700 text-gray-400'}`}
+                        >
+                          {rate} RPM/s
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col justify-end">
+                    <button
+                      onClick={() => {
+                        if (dynoRunning) setDynoRunning(false);
+                        else {
+                          setLiveDynoRpm(2500);
+                          setDynoRunning(true);
+                        }
+                      }}
+                      className={`w-full py-2.5 rounded-lg font-black text-xs uppercase tracking-wider shadow-xl transition-all ${
+                        dynoRunning ? 'bg-red-600 hover:bg-red-500 text-white animate-pulse' : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                      }`}
+                    >
+                      {dynoRunning ? 'ABORT SWEEP (HOLD)' : 'RUN WATER-BRAKE SWEEP'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  <div className="lg:col-span-2 bg-chevyPanel rounded-xl border border-gray-800 p-4 space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-white font-bold uppercase text-[11px]">SAE J1349 ABSORPTION POWER & TORQUE</span>
+                      <span className="text-cadGreen font-bold">PEAK: {testMath.correctedPeakHp} HP @ {testMath.camData.hpRpm} / {testMath.correctedPeakTq} TQ @ {testMath.camData.tqRpm}</span>
+                    </div>
+
+                    <div className="relative h-64 w-full crt-glow rounded-lg border border-emerald-950 p-2">
+                      <svg className="w-full h-full" viewBox="0 0 800 240">
+                        {[0, 60, 120, 180, 240].map(y => (
+                          <line key={y} x1="50" y1={y} x2="780" y2={y} stroke="#132a1e" strokeWidth="1" />
+                        ))}
+                        <line x1="520" y1="0" x2="520" y2="240" stroke="#00ff66" strokeWidth="1" strokeDasharray="3" opacity="0.4" />
+                        <text x="525" y="16" fill="#00ff66" fontSize="10">5252 RPM Crossover</text>
+                        <path d="M 50 110 Q 280 40 520 70 T 780 135" fill="none" stroke="#ffb703" strokeWidth="3" />
+                        <path d="M 50 185 Q 280 85 520 70 T 780 50" fill="none" stroke="#ff4d00" strokeWidth="3.5" />
+                        <line x1={50 + ((liveDynoRpm - 2500) / 4000) * 730} y1="0" x2={50 + ((liveDynoRpm - 2500) / 4000) * 730} y2="240" stroke="#00f0ff" strokeWidth="2" />
+                      </svg>
+                    </div>
+                  </div>
+
+                  <div className="bg-chevyPanel rounded-xl border border-gray-800 p-4 space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-white uppercase text-[11px]">LIVE LOG TABLE</span>
+                      <button onClick={exportDynoCSV} className="text-[10px] text-cadGreen font-bold underline hover:text-white">Save .CSV</button>
+                    </div>
+
+                    <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                      <table className="w-full text-left text-[10px] font-mono">
+                        <thead className="bg-black/60 text-gray-400 sticky top-0">
+                          <tr>
+                            <th className="py-1">RPM</th>
+                            <th className="py-1 text-chevyGold">TQ</th>
+                            <th className="py-1 text-chevyOrange">BHP</th>
+                            <th className="py-1">BMEP</th>
+                            <th className="py-1">BSFC</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-800">
+                          {dynoTableData.map(r => (
+                            <tr key={r.rpm} className={r.rpm === liveDynoRpm ? "bg-cyan-950/40 font-bold text-white" : ""}>
+                              <td className="py-1">{r.rpm}</td>
+                              <td className="py-1 text-chevyGold">{r.tq}</td>
+                              <td className="py-1 text-chevyOrange">{r.corrHp}</td>
+                              <td className="py-1">{r.bmep}</td>
+                              <td className="py-1 text-cadGreen">{r.bsfc}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 4: IN-CYLINDER PRESSURE & P-V COMBUSTION ANALYZER */}
+            {activeTab === 'combustion' && (
+              <div className="p-4 sm:p-6 max-w-6xl mx-auto w-full space-y-5 font-mono text-xs">
+                <div className="flex justify-between items-center pb-2 border-b border-gray-800">
+                  <h2 className="text-base font-bold text-white uppercase tracking-wider font-sans">IN-CYLINDER PRESSURE P(θ) & P-V INDICATOR DIAGRAM</h2>
+                  <button onClick={() => handleAskAi("Explain peak cylinder pressure location at 15 deg ATDC and how timing affects it")} className="px-3 py-1 rounded bg-purple-900/40 border border-purple-500/60 text-purple-300 font-bold hover:bg-purple-600 hover:text-white">
+                    💡 AI Combustion Check
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                  <div className="bg-chevyPanel p-3.5 rounded-xl border border-cadCyan/40">
+                    <span className="text-[10px] text-gray-400 block uppercase">PEAK PRESSURE (Pmax)</span>
+                    <div className="text-xl font-black text-cadCyan mt-1">{testMath.peakCylPressurePsi} PSI</div>
+                  </div>
+                  <div className="bg-chevyPanel p-3.5 rounded-xl border border-emerald-500/40">
+                    <span className="text-[10px] text-gray-400 block uppercase">LOCATION PEAK (LPP)</span>
+                    <div className="text-xl font-black text-cadGreen mt-1">{testMath.lppDegAtdc}° ATDC</div>
+                  </div>
+                  <div className="bg-chevyPanel p-3.5 rounded-xl border border-chevyGold/40">
+                    <span className="text-[10px] text-gray-400 block uppercase">INDICATED MEP</span>
+                    <div className="text-xl font-black text-chevyGold mt-1">{testMath.imepPsi} PSI</div>
+                  </div>
+                  <div className="bg-chevyPanel p-3.5 rounded-xl border border-chevyOrange/40">
+                    <span className="text-[10px] text-gray-400 block uppercase">DETONATION INDEX</span>
+                    <div className="text-xl font-black text-emerald-400 mt-1">0.02 (CLEAN)</div>
+                  </div>
+                </div>
+
+                <div className="bg-chevyPanel p-4 rounded-xl border border-gray-800 space-y-2">
+                  <span className="text-white font-bold uppercase text-[11px]">COMBUSTION PRESSURE WAVE OVER 360°</span>
+                  <div className="relative h-60 w-full crt-glow rounded-lg border border-emerald-950 p-2">
+                    <svg className="w-full h-full" viewBox="0 0 800 220">
+                      <line x1="400" y1="0" x2="400" y2="220" stroke="#334155" strokeDasharray="3" />
+                      <text x="405" y="15" fill="#94a3b8" fontSize="10">TDC (0°)</text>
+                      <path d="M 50 200 Q 280 180 340 120 T 430 25 T 480 110 T 750 200" fill="none" stroke="#00f0ff" strokeWidth="3" />
+                      <circle cx="430" cy="25" r="4" fill="#00ff66" />
+                      <text x="440" y="25" fill="#00ff66" fontSize="10">Pmax (15° ATDC)</text>
+                    </svg>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 5: 8-CHANNEL EGT TELEMETRY */}
+            {activeTab === 'egtDiagnostics' && (
+              <div className="p-4 sm:p-6 max-w-6xl mx-auto w-full space-y-5 font-mono text-xs">
+                <div className="flex justify-between items-center pb-2 border-b border-gray-800">
+                  <h2 className="text-base font-bold text-white uppercase tracking-wider font-sans">8-CHANNEL EGT & AIR/FUEL THERMAL GRADIENT</h2>
+                  <button onClick={() => handleAskAi("Why do small block chevy center siamese exhaust ports run hotter EGT?")} className="px-3 py-1 rounded bg-purple-900/40 border border-purple-500/60 text-purple-300 font-bold hover:bg-purple-600 hover:text-white">
+                    💡 Siamese Port Check
+                  </button>
+                </div>
+
+                <div className="bg-chevyPanel p-4 rounded-xl border border-gray-800 space-y-3">
+                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-2 pt-2">
+                    {testMath.egtChannels.map(ch => (
+                      <div key={ch.cyl} className="bg-black/60 p-2.5 rounded-lg border border-gray-800 flex flex-col items-center">
+                        <span className="text-[10px] text-gray-400 font-bold">CYL #{ch.cyl}</span>
+                        <div className="h-32 w-6 bg-gray-900 rounded-full my-2 relative overflow-hidden flex flex-col justify-end">
+                          <div 
+                            style={{ height: `${((ch.temp - 1000) / 450) * 100}%` }}
+                            className={`w-full rounded-full ${ch.siamese ? 'bg-gradient-to-t from-orange-500 to-red-500' : 'bg-gradient-to-t from-yellow-500 to-orange-500'}`}
+                          />
+                        </div>
+                        <span className={`font-bold ${ch.siamese ? 'text-chevyOrange' : 'text-chevyGold'}`}>{ch.temp}°F</span>
+                        <span className="text-[10px] text-gray-400 mt-1">AFR: {ch.afr}</span>
+                        {ch.siamese && <span className="text-[9px] text-red-400 font-bold">SIAMESE</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 6: LEAKDOWN BENCH */}
+            {activeTab === 'leakdown' && (
+              <div className="p-4 sm:p-6 max-w-6xl mx-auto w-full space-y-5 font-mono text-xs">
+                <h2 className="text-base font-bold text-white uppercase tracking-wider font-sans">100 PSI DIFFERENTIAL LEAKDOWN & CRANKING COMPRESSION</h2>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="bg-chevyPanel p-4 rounded-xl border border-emerald-500/40">
+                    <span className="text-emerald-400 font-bold block">CRANKING COMPRESSION: {testMath.crankingPsi} PSI</span>
+                    <p className="text-gray-400 text-[10px] mt-1">Dynamic ratio {testMath.dynamicCR}:1</p>
+                  </div>
+                  <div className="bg-chevyPanel p-4 rounded-xl border border-gray-800">
+                    <span className="text-cadGreen font-bold block">LEAKDOWN: 4.2%</span>
+                    <p className="text-gray-400 text-[10px] mt-1">95.8 / 100 PSI holding pressure</p>
+                  </div>
+                  <div className="bg-chevyPanel p-4 rounded-xl border border-gray-800">
+                    <span className="text-cadCyan font-bold block">SEAL STATUS</span>
+                    <p className="text-cadGreen font-bold text-[11px] mt-1">Rings & Valves Passed</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 7: MODSIM SIMULATION */}
+            {activeTab === 'modsim' && (
+              <div className="p-4 sm:p-6 max-w-6xl mx-auto w-full space-y-5 font-mono text-xs">
+                <h2 className="text-base font-bold text-white uppercase tracking-wider font-sans">MODSIM MULTI-PHYSICS SIMULATION</h2>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="bg-chevyPanel p-3.5 rounded-xl border border-gray-800">
+                    <span className="text-[10px] text-gray-400 uppercase">ROD/STROKE RATIO</span>
+                    <div className="text-xl font-bold text-cadCyan">{testMath.rodStrokeRatio}:1</div>
+                  </div>
+                  <div className="bg-chevyPanel p-3.5 rounded-xl border border-gray-800">
+                    <span className="text-[10px] text-gray-400 uppercase">QUENCH SQUISH</span>
+                    <div className="text-xl font-bold text-emerald-400">{testMath.quenchDistance}"</div>
+                  </div>
+                  <div className="bg-chevyPanel p-3.5 rounded-xl border border-gray-800">
+                    <span className="text-[10px] text-gray-400 uppercase">DYNAMIC COMPRESSION</span>
+                    <div className="text-xl font-bold text-chevyGold">{testMath.dynamicCR}:1</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 8: ROTATING ASSEMBLY */}
+            {activeTab === 'rotating' && (
+              <div className="p-4 sm:p-6 max-w-6xl mx-auto w-full space-y-5 font-mono text-xs">
+                <h2 className="text-base font-bold text-white uppercase tracking-wider font-sans">ROTATING ASSEMBLY & BLUEPRINT DIMENSIONS</h2>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="bg-chevyPanel p-4 rounded-xl border border-gray-800 space-y-2">
+                    <div className="flex justify-between"><span className="text-gray-400">BORE:</span><span className="text-chevyOrange font-bold">{bore.toFixed(3)}"</span></div>
+                    <input type="range" min="3.900" max="4.155" step="0.005" value={bore} onChange={e => setBore(parseFloat(e.target.value))} className="w-full accent-chevyOrange" />
+                  </div>
+                  <div className="bg-chevyPanel p-4 rounded-xl border border-gray-800 space-y-2">
+                    <div className="flex justify-between"><span className="text-gray-400">STROKE:</span><span className="text-chevyGold font-bold">{stroke.toFixed(3)}"</span></div>
+                    <input type="range" min="3.000" max="4.000" step="0.005" value={stroke} onChange={e => setStroke(parseFloat(e.target.value))} className="w-full accent-chevyGold" />
+                  </div>
+                  <div className="bg-chevyPanel p-4 rounded-xl border border-gray-800 space-y-2">
+                    <div className="flex justify-between"><span className="text-gray-400">ROD LENGTH:</span><span className="text-emerald-400 font-bold">{rodLength.toFixed(3)}"</span></div>
+                    <input type="range" min="5.565" max="6.125" step="0.005" value={rodLength} onChange={e => setRodLength(parseFloat(e.target.value))} className="w-full accent-emerald-400" />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 9: TRANSMISSION MATRIX */}
+            {activeTab === 'trans' && (
+              <div className="p-4 sm:p-6 max-w-6xl mx-auto w-full space-y-5 font-mono text-xs">
+                <h2 className="text-base font-bold text-white uppercase tracking-wider font-sans">28-TRANSMISSION DRIVETRAIN RATIO AUDIT</h2>
+                <div className="bg-chevyPanel p-4 rounded-xl border border-gray-800">
+                  <select value={selectedTrans} onChange={e => setSelectedTrans(e.target.value)} className="bg-black/60 border border-gray-700 rounded p-2 text-white font-bold w-full max-w-md">
+                    {Object.values(TRANSMISSIONS_DB).map(t => (
+                      <option key={t.id} value={t.id}>[{t.type}] {t.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 10: AI RESEARCH COPILOT */}
+            {activeTab === 'aiCopilot' && (
+              <div className="p-4 sm:p-6 max-w-6xl mx-auto w-full space-y-5 font-mono text-xs">
+                <h2 className="text-base font-bold text-white uppercase tracking-wider font-sans flex items-center gap-2">
+                  <span>🤖</span>
+                  <span>NEURAL AI MACHINING COPILOT</span>
+                </h2>
+                <div className="bg-chevyPanel rounded-xl border border-purple-500/40 p-4 space-y-3">
+                  <div className="h-64 overflow-y-auto space-y-2 p-2 bg-black/60 rounded-lg">
+                    {aiChatHistory.map((m, i) => (
+                      <div key={i} className={`p-2.5 rounded-lg text-xs leading-relaxed whitespace-pre-wrap ${m.sender === 'user' ? 'bg-purple-900/40 border border-purple-500/60 text-purple-200 ml-8' : 'bg-chevyCard border border-gray-700 text-gray-200 mr-8'}`}>
+                        {m.text}
+                      </div>
+                    ))}
+                  </div>
+                  <form onSubmit={(e) => { e.preventDefault(); executeAiQuery(); }} className="flex gap-2">
+                    <input type="text" placeholder="Ask about moving parts kinematics, CAD tolerances, or dyno sweeps..." value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} className="flex-1 bg-black/60 border border-gray-700 rounded-lg px-3 py-2 text-white text-xs" />
+                    <button type="submit" className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-lg text-xs">Search</button>
+                  </form>
+                </div>
+              </div>
+            )}
+
+          </main>
+
+          {/* FLOATING AI COPILOT DRAWER */}
+          {aiDrawerOpen && (
+            <div className="fixed inset-y-0 right-0 w-full sm:w-96 bg-chevyPanel/95 backdrop-blur-md border-l border-purple-500/50 shadow-2xl z-50 flex flex-col p-4 font-mono text-xs">
+              <div className="flex items-center justify-between pb-3 border-b border-gray-800">
+                <span className="font-bold text-white flex items-center gap-2"><span>🤖</span> AI MOTOR TEST COPILOT</span>
+                <button onClick={() => setAiDrawerOpen(false)} className="text-gray-400 hover:text-white font-bold p-1">✕</button>
+              </div>
+              <div className="flex-1 overflow-y-auto space-y-2 py-3">
+                {aiChatHistory.map((m, i) => (
+                  <div key={i} className={`p-2.5 rounded-lg text-xs leading-relaxed whitespace-pre-wrap ${m.sender === 'user' ? 'bg-purple-900/40 border border-purple-500/60 text-purple-200 ml-4' : 'bg-black/60 border border-gray-800 text-gray-200 mr-4'}`}>
+                    {m.text}
+                  </div>
+                ))}
+              </div>
+              <form onSubmit={(e) => { e.preventDefault(); executeAiQuery(); }} className="pt-2 border-t border-gray-800 flex gap-2">
+                <input type="text" placeholder="Ask test diagnostic question..." value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} className="flex-1 bg-black/60 border border-gray-700 rounded px-2.5 py-1.5 text-white text-xs" />
+                <button type="submit" className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded text-xs">Send</button>
+              </form>
+            </div>
+          )}
+
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<SBC350App />);
+  </script>
+</body>
+</html>
