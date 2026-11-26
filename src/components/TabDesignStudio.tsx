@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import * as THREE from 'three';
 import {
   CinematicLightingPreset,
   CoordinatedSpecs,
@@ -25,7 +26,8 @@ import {
   ComponentRenderMode,
   ComponentViewportLayout
 } from './CADViewer/Component3DTechRenderer';
-import { exportPartProfileToDXF } from '../utils/cadExporters';
+import { exportObject3DToSTL, exportPartProfileToDXF } from '../utils/cadExporters';
+import { scalePointsToMm, VectorContour, vectorizeImageFile, VectorizeResult, VectorPoint, } from '../utils/imageVectorizer';
 import {
   Box,
   CheckCircle2,
@@ -312,6 +314,44 @@ export const TabDesignStudio: React.FC<TabDesignStudioProps> = ({
   const [camSimRunning, setCamSimRunning] = useState<boolean>(true);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const [failedImages, setFailedImages] = useState<Record<string, boolean>>({});
+// Image-to-3D (Tab 14 draft workflow) state — Ray's numbers only, no invented dimensions
+const [imageFile, setImageFile] = useState<File | null>(null);
+const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+const [tracedPartName, setTracedPartName] = useState<string>('');
+const [thresholdOverrideInput, setThresholdOverrideInput] = useState<string>('');
+const [rdpEpsilonInput, setRdpEpsilonInput] = useState<string>('1.0');
+const [minContourAreaInput, setMinContourAreaInput] = useState<string>('16');
+const [traceResult, setTraceResult] = useState<VectorizeResult | null>(null);
+const [draftContours, setDraftContours] = useState<VectorContour[] | null>(null);
+const [selectedContourIdx, setSelectedContourIdx] = useState<number>(0);
+const [isTracing, setIsTracing] = useState<boolean>(false);
+const [traceError, setTraceError] = useState<string | null>(null);
+// Reference scale inputs (pixels -> mm) — required from user, no defaults
+const [scaleInputMode, setScaleInputMode] = useState<'reference_span' | 'direct_px_per_mm'>('reference_span');
+const [refSpanPxInput, setRefSpanPxInput] = useState<string>('');
+const [refSpanMmInput, setRefSpanMmInput] = useState<string>('');
+const [directPxPerMmInput, setDirectPxPerMmInput] = useState<string>('');
+const [originMode, setOriginMode] = useState<'bottom_left' | 'center'>('bottom_left');
+// 2D drafting overlay interaction state
+const [overlayTool, setOverlayTool] = useState<'inspect' | 'caliper' | 'edit_vertices'>('inspect');
+const [caliperPoints, setCaliperPoints] = useState<VectorPoint[]>([]);
+const [selectedVertexIdx, setSelectedVertexIdx] = useState<number | null>(null);
+const [vertexEditXInput, setVertexEditXInput] = useState<string>('');
+const [vertexEditYInput, setVertexEditYInput] = useState<string>('');
+// Extrude depth (required from user, no default) and local Three.js extruded mesh state
+const [extrudeDepthMmInput, setExtrudeDepthMmInput] = useState<string>('');
+const [extrudedPart, setExtrudedPart] = useState<{
+  outerMm: VectorPoint[];
+  holesMm: VectorPoint[][];
+  depthMm: number;
+  widthMm: number;
+  heightMm: number;
+  triangleCount: number;
+  partName: string;
+} | null>(null);
+const overlaySvgRef = useRef<SVGSVGElement | null>(null);
+const extrudePreviewMountRef = useRef<HTMLDivElement | null>(null);
+const extrudedGroupRef = useRef<THREE.Group | null>(null);
 
   const matrix = useMemo(() => getManufacturingMatrix(config, specs), [config, specs]);
   const activePartEntry = useMemo(
@@ -606,6 +646,694 @@ export const TabDesignStudio: React.FC<TabDesignStudioProps> = ({
   const deckClearH = Math.max(3, Math.min(12, config.deckClearance * 280));
   const cxCross = 230;
   const cxOrtho = 610;
+
+const activeContours = draftContours ?? traceResult?.contours ?? null;
+const selectedContour: VectorContour | null =
+  activeContours && activeContours.length > 0 ? (activeContours[selectedContourIdx] ?? activeContours[0] ?? null) : null;
+const selectedContourPxBounds = useMemo(() => {
+  if (!selectedContour || selectedContour.points.length === 0) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < selectedContour.points.length; i++) {
+    const p = selectedContour.points[i];
+    if (!p) continue;
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  if (!Number.isFinite(minX)) return null;
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    widthPx: maxX - minX,
+    heightPx: maxY - minY,
+  };
+}, [selectedContour]);
+const activePixelsPerMm: number | null = useMemo(() => {
+  if (scaleInputMode === 'direct_px_per_mm') {
+    if (directPxPerMmInput.trim() === '') return null;
+    const val = Number(directPxPerMmInput);
+    return Number.isFinite(val) && val > 0 ? val : null;
+  }
+  if (refSpanPxInput.trim() === '' || refSpanMmInput.trim() === '') return null;
+  const px = Number(refSpanPxInput);
+  const mm = Number(refSpanMmInput);
+  if (!Number.isFinite(px) || !Number.isFinite(mm) || px <= 0 || mm <= 0) {
+    return null;
+  }
+  return px / mm;
+}, [scaleInputMode, directPxPerMmInput, refSpanPxInput, refSpanMmInput]);
+const parsedExtrudeDepthMm: number | null = useMemo(() => {
+  if (extrudeDepthMmInput.trim() === '') return null;
+  const val = Number(extrudeDepthMmInput);
+  return Number.isFinite(val) && val > 0 ? val : null;
+}, [extrudeDepthMmInput]);
+const transformPointsToCadMm = (
+  contour: VectorContour,
+  pixelsPerMm: number,
+  frameOrigin: 'bottom_left' | 'center'
+): {
+  outerMm: VectorPoint[];
+  holesMm: VectorPoint[][];
+  widthMm: number;
+  heightMm: number;
+  minXMm: number;
+  maxXMm: number;
+  minYMm: number;
+  maxYMm: number;
+} => {
+  const rawOuter = scalePointsToMm(contour.points, pixelsPerMm);
+  const rawHoles = contour.holes.map((h) => scalePointsToMm(h, pixelsPerMm));
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < rawOuter.length; i++) {
+    const p = rawOuter[i];
+    if (!p) continue;
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const widthMm = maxX - minX;
+  const heightMm = maxY - minY;
+  const cx = (minX + maxX) * 0.5;
+  const cy = (minY + maxY) * 0.5;
+  const toCad = (pt: VectorPoint): VectorPoint => {
+    if (frameOrigin === 'center') {
+      return { x: pt.x - cx, y: cy - pt.y };
+    }
+    return { x: pt.x - minX, y: maxY - pt.y };
+  };
+  const signedArea = (pts: VectorPoint[]): number => {
+    let s = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % pts.length];
+      if (!a || !b) continue;
+      s += a.x * b.y - b.x * a.y;
+    }
+    return s * 0.5;
+  };
+  const outerMm = rawOuter.map(toCad);
+  if (signedArea(outerMm) < 0) {
+    outerMm.reverse();
+  }
+  const holesMm = rawHoles.map((hole) => {
+    const mapped = hole.map(toCad);
+    if (signedArea(mapped) > 0) {
+      mapped.reverse();
+    }
+    return mapped;
+  });
+  return {
+    outerMm,
+    holesMm,
+    widthMm,
+    heightMm,
+    minXMm: frameOrigin === 'center' ? -widthMm * 0.5 : 0,
+    maxXMm: frameOrigin === 'center' ? widthMm * 0.5 : widthMm,
+    minYMm: frameOrigin === 'center' ? -heightMm * 0.5 : 0,
+    maxYMm: frameOrigin === 'center' ? heightMm * 0.5 : heightMm,
+  };
+};
+const scaledPreviewMetrics = useMemo(() => {
+  if (!selectedContour || activePixelsPerMm === null) return null;
+  const cad = transformPointsToCadMm(selectedContour, activePixelsPerMm, originMode);
+  return {
+    widthMm: cad.widthMm,
+    heightMm: cad.heightMm,
+    outerMm: cad.outerMm,
+    holesMm: cad.holesMm,
+  };
+}, [selectedContour, activePixelsPerMm, originMode]);
+const resolvedTracedPartSlug = useMemo(() => {
+  const raw =
+    tracedPartName.trim() ||
+    (imageFile ? imageFile.name.replace(/\.[^.]+$/, '') : '') ||
+    designTitle.trim() ||
+    drawingNumber;
+  const sanitized = raw.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  return sanitized || drawingNumber;
+}, [tracedPartName, imageFile, designTitle, drawingNumber]);
+
+useEffect(() => {
+  return () => {
+    if (imagePreviewUrl) {
+      URL.revokeObjectURL(imagePreviewUrl);
+    }
+  };
+}, [imagePreviewUrl]);
+
+useEffect(() => {
+  if (!selectedContour || selectedVertexIdx === null) {
+    setVertexEditXInput('');
+    setVertexEditYInput('');
+    return;
+  }
+  const pt = selectedContour.points[selectedVertexIdx];
+  if (!pt) {
+    setVertexEditXInput('');
+    setVertexEditYInput('');
+    return;
+  }
+  if (activePixelsPerMm !== null && selectedContourPxBounds) {
+    const xMm =
+      originMode === 'center' ? (pt.x - (selectedContourPxBounds.minX + selectedContourPxBounds.maxX) * 0.5) / activePixelsPerMm
+        : (pt.x - selectedContourPxBounds.minX) / activePixelsPerMm;
+    const yMm =
+      originMode === 'center' ? ((selectedContourPxBounds.minY + selectedContourPxBounds.maxY) * 0.5 - pt.y) / activePixelsPerMm
+        : (selectedContourPxBounds.maxY - pt.y) / activePixelsPerMm;
+    setVertexEditXInput(String(xMm));
+    setVertexEditYInput(String(yMm));
+  } else {
+    setVertexEditXInput(String(pt.x));
+    setVertexEditYInput(String(pt.y));
+  }
+}, [selectedContour, selectedVertexIdx, activePixelsPerMm, originMode, selectedContourPxBounds]);
+
+useEffect(() => {
+  const mount = extrudePreviewMountRef.current;
+  if (!mount || !extrudedPart) {
+    extrudedGroupRef.current = null;
+    return;
+  }
+  const width = Math.max(240, mount.clientWidth || 480);
+  const height = Math.max(240, mount.clientHeight || 320);
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b1220);
+  const camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 100000);
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(width, height);
+  mount.innerHTML = '';
+  mount.appendChild(renderer.domElement);
+  const ambient = new THREE.AmbientLight(0xdbeafe, 0.75);
+  scene.add(ambient);
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.05);
+  keyLight.position.set(1.2, 1.6, 1.4);
+  scene.add(keyLight);
+  const fillLight = new THREE.DirectionalLight(0x93c5fd, 0.45);
+  fillLight.position.set(-1.3, -0.8, -1.0);
+  scene.add(fillLight);
+  const shape = new THREE.Shape();
+  const firstOuter = extrudedPart.outerMm[0];
+  if (firstOuter) {
+    shape.moveTo(firstOuter.x, firstOuter.y);
+    for (let i = 1; i < extrudedPart.outerMm.length; i++) {
+      const pt = extrudedPart.outerMm[i];
+      if (pt) shape.lineTo(pt.x, pt.y);
+    }
+    shape.closePath();
+  }
+  for (let h = 0; h < extrudedPart.holesMm.length; h++) {
+    const hole = extrudedPart.holesMm[h];
+    if (!hole || hole.length < 3) continue;
+    const holeFirst = hole[0];
+    if (!holeFirst) continue;
+    const holePath = new THREE.Path();
+    holePath.moveTo(holeFirst.x, holeFirst.y);
+    for (let i = 1; i < hole.length; i++) {
+      const pt = hole[i];
+      if (pt) holePath.lineTo(pt.x, pt.y);
+    }
+    holePath.closePath();
+    shape.holes.push(holePath);
+  }
+  const geometry = new THREE.ExtrudeGeometry(shape, {
+    depth: extrudedPart.depthMm,
+    bevelEnabled: false,
+    curveSegments: 1,
+  });
+  geometry.computeVertexNormals();
+  const material = new THREE.MeshStandardMaterial({
+    color: 0x38bdf8,
+    metalness: 0.25,
+    roughness: 0.42,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  const edgesGeometry = new THREE.EdgesGeometry(geometry, 15);
+  const edgesMaterial = new THREE.LineBasicMaterial({ color: 0xe0f2fe });
+  const edges = new THREE.LineSegments(edgesGeometry, edgesMaterial);
+  edges.userData._excludeExport = true;
+  const partGroup = new THREE.Group();
+  partGroup.add(mesh);
+  partGroup.add(edges);
+  scene.add(partGroup);
+  extrudedGroupRef.current = partGroup;
+  const bbox = new THREE.Box3().setFromObject(partGroup);
+  const center = new THREE.Vector3();
+  const size = new THREE.Vector3();
+  bbox.getCenter(center);
+  bbox.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z, 1);
+  const gridSize = Math.max(10, Math.ceil(maxDim * 2.2));
+  const grid = new THREE.GridHelper(gridSize, 16, 0x334155, 0x1e293b);
+  grid.rotation.x = Math.PI * 0.5;
+  grid.position.set(center.x, center.y, -0.05);
+  grid.userData._excludeExport = true;
+  scene.add(grid);
+  const axes = new THREE.AxesHelper(maxDim * 0.35);
+  axes.userData._excludeExport = true;
+  scene.add(axes);
+  let theta = Math.PI * 0.24;
+  let phi = Math.PI * 0.34;
+  let radius = maxDim * 2.1;
+  camera.near = Math.max(0.01, maxDim * 0.002);
+  camera.far = Math.max(1000, maxDim * 80);
+  camera.updateProjectionMatrix();
+  const updateCamera = () => {
+    const sinPhi = Math.sin(phi);
+    camera.position.set(
+      center.x + radius * sinPhi * Math.sin(theta),
+      center.y - radius * sinPhi * Math.cos(theta),
+      center.z + radius * Math.cos(phi)
+    );
+    camera.up.set(0, 0, 1);
+    camera.lookAt(center);
+  };
+  updateCamera();
+  let isDragging = false;
+  let lastClientX = 0;
+  let lastClientY = 0;
+  const onPointerDown = (ev: PointerEvent) => {
+    isDragging = true;
+    lastClientX = ev.clientX;
+    lastClientY = ev.clientY;
+    renderer.domElement.setPointerCapture(ev.pointerId);
+  };
+  const onPointerMove = (ev: PointerEvent) => {
+    if (!isDragging) return;
+    const dx = ev.clientX - lastClientX;
+    const dy = ev.clientY - lastClientY;
+    lastClientX = ev.clientX;
+    lastClientY = ev.clientY;
+    theta -= dx * 0.01;
+    phi = Math.min(Math.PI - 0.08, Math.max(0.08, phi - dy * 0.01));
+    updateCamera();
+  };
+  const onPointerUp = (ev: PointerEvent) => {
+    isDragging = false;
+    if (renderer.domElement.hasPointerCapture(ev.pointerId)) {
+      renderer.domElement.releasePointerCapture(ev.pointerId);
+    }
+  };
+  const onWheel = (ev: WheelEvent) => {
+    ev.preventDefault();
+    const factor = ev.deltaY > 0 ? 1.12 : 0.89;
+    radius = Math.min(maxDim * 20, Math.max(maxDim * 0.4, radius * factor));
+    updateCamera();
+  };
+
+  renderer.domElement.addEventListener('pointerdown', onPointerDown);
+  renderer.domElement.addEventListener('pointermove', onPointerMove);
+  renderer.domElement.addEventListener('pointerup', onPointerUp);
+  renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
+  const resizeObserver = new ResizeObserver(() => {
+    if (!mount) return;
+    const nextW = Math.max(240, mount.clientWidth || width);
+    const nextH = Math.max(240, mount.clientHeight || height);
+    camera.aspect = nextW / nextH;
+    camera.updateProjectionMatrix();
+    renderer.setSize(nextW, nextH);
+  });
+  resizeObserver.observe(mount);
+  let rafId = 0;
+  const renderLoop = () => {
+    renderer.render(scene, camera);
+    rafId = window.requestAnimationFrame(renderLoop);
+  };
+  renderLoop();
+  return () => {
+    window.cancelAnimationFrame(rafId);
+    resizeObserver.disconnect();
+    renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+    renderer.domElement.removeEventListener('pointermove', onPointerMove);
+    renderer.domElement.removeEventListener('pointerup', onPointerUp);
+    renderer.domElement.removeEventListener('wheel', onWheel);
+    geometry.dispose();
+    material.dispose();
+    edgesGeometry.dispose();
+    edgesMaterial.dispose();
+    renderer.dispose();
+    extrudedGroupRef.current = null;
+    if (renderer.domElement.parentNode === mount) {
+      mount.removeChild(renderer.domElement);
+    }
+  };
+}, [extrudedPart]);
+const runVectorTrace = async (
+  fileToTrace: File,
+  opts?: { resetThresholdToAuto?: boolean }
+): Promise<void> => {
+  const rdpEpsilon = Number(rdpEpsilonInput);
+  if (rdpEpsilonInput.trim() === '' || !Number.isFinite(rdpEpsilon) || rdpEpsilon < 0) {
+    const msg = 'RDP epsilon must be a finite number >= 0.';
+    setTraceError(msg);
+    notify(msg);
+    return;
+  }
+  const minContourArea = Number(minContourAreaInput);
+  if (
+    minContourAreaInput.trim() === '' ||
+    !Number.isFinite(minContourArea) ||
+    minContourArea < 0
+  ) {
+    const msg = 'Minimum contour area must be a finite number >= 0.';
+    setTraceError(msg);
+    notify(msg);
+    return;
+  }
+  let thresholdVal: number | undefined = undefined;
+  if (!opts?.resetThresholdToAuto && thresholdOverrideInput.trim() !== '') {
+    const parsedT = Number(thresholdOverrideInput);
+    if (!Number.isFinite(parsedT) || parsedT < 0 || parsedT > 255) {
+      const msg = 'Threshold override must be a finite number between 0 and 255.';
+      setTraceError(msg);
+      notify(msg);
+      return;
+    }
+    thresholdVal = parsedT;
+  }
+
+  setIsTracing(true);
+  setTraceError(null);
+  setExtrudedPart(null);
+  setSelectedVertexIdx(null);
+  try {
+    const result = await vectorizeImageFile(fileToTrace, {
+      threshold: thresholdVal,
+      rdpEpsilon,
+      minContourArea,
+    });
+    setTraceResult(result);
+    setDraftContours(
+      result.contours.map((c) => ({
+        points: c.points.map((p) => ({ x: p.x, y: p.y })),
+        holes: c.holes.map((h) => h.map((p) => ({ x: p.x, y: p.y }))),
+      }))
+    );
+    setSelectedContourIdx(0);
+    if (opts?.resetThresholdToAuto) {
+      setThresholdOverrideInput('');
+    }
+    notify(`Traced ${result.contours.length} outer contour(s) at threshold ${result.thresholdUsed} (RDP ε=${rdpEpsilon} px).`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Image vectorization failed.';
+    setTraceResult(null);
+    setDraftContours(null);
+    setTraceError(msg);
+    notify(`Trace error: ${msg}`);
+  } finally {
+    setIsTracing(false);
+  }
+};
+const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const lower = file.name.toLowerCase();
+  const validType =
+    file.type === 'image/png' ||
+    file.type === 'image/jpeg' ||
+    lower.endsWith('.png') ||
+    lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg');
+  if (!validType) {
+    const msg = `Unsupported file "${file.name}". Please upload a PNG or JPG image.`;
+    setTraceError(msg);
+    notify(msg);
+    return;
+  }
+  if (imagePreviewUrl) {
+    URL.revokeObjectURL(imagePreviewUrl);
+  }
+  const nextUrl = URL.createObjectURL(file);
+  setImageFile(file);
+  setImagePreviewUrl(nextUrl);
+  setTracedPartName(file.name.replace(/\.[^.]+$/, ''));
+  setThresholdOverrideInput('');
+  setTraceResult(null);
+  setDraftContours(null);
+  setExtrudedPart(null);
+  setCaliperPoints([]);
+  setSelectedVertexIdx(null);
+  setTraceError(null);
+  await runVectorTrace(file, { resetThresholdToAuto: true });
+};
+const handleTrace = async (resetToOtsu = false): Promise<void> => {
+  if (!imageFile) {
+    const msg = 'Upload a PNG or JPG image before tracing.';
+    setTraceError(msg);
+    notify(msg);
+    return;
+  }
+  await runVectorTrace(imageFile, { resetThresholdToAuto: resetToOtsu });
+};
+const handleOverlaySvgClick = (e: React.MouseEvent<SVGSVGElement>): void => {
+  if (!traceResult || !overlaySvgRef.current) return;
+  if (overlayTool === 'inspect') return;
+  const rect = overlaySvgRef.current.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
+  const pxX = ((e.clientX - rect.left) / rect.width) * traceResult.width;
+  const pxY = ((e.clientY - rect.top) / rect.height) * traceResult.height;
+  if (overlayTool === 'caliper') {
+    const nextPts = caliperPoints.length >= 2 ? [{ x: pxX, y: pxY }] : [...caliperPoints, { x: pxX, y: pxY }];
+    setCaliperPoints(nextPts);
+    if (nextPts.length === 2) {
+      const a = nextPts[0];
+      const b = nextPts[1];
+      if (a && b) {
+        const distPx = Math.hypot(b.x - a.x, b.y - a.y);
+        setScaleInputMode('reference_span');
+        setRefSpanPxInput(String(distPx));
+        notify(`Measured reference span: ${distPx.toFixed(2)} px. Enter the real mm length.`);
+      }
+    }
+    return;
+  }
+  if (overlayTool === 'edit_vertices' && selectedContour && activeContours) {
+    if (selectedVertexIdx !== null) {
+      const insertAfter = selectedVertexIdx;
+      const updatedContours = activeContours.map((c, idx) => {
+        if (idx !== selectedContourIdx) return c;
+        const nextPts = c.points.slice();
+        nextPts.splice(insertAfter + 1, 0, { x: pxX, y: pxY });
+        return { ...c, points: nextPts };
+      });
+      setDraftContours(updatedContours);
+      setSelectedVertexIdx(insertAfter + 1);
+      setExtrudedPart(null);
+    }
+  }
+};
+const handleApplyVertexEdit = (): void => {
+  if (selectedVertexIdx === null || !selectedContour || !activeContours) return;
+  const xInput = Number(vertexEditXInput);
+  const yInput = Number(vertexEditYInput);
+  if (
+    vertexEditXInput.trim() === '' ||
+    vertexEditYInput.trim() === '' ||
+    !Number.isFinite(xInput) ||
+    !Number.isFinite(yInput)
+  ) {
+    notify('Vertex X and Y must both be valid finite numbers.');
+    return;
+  }
+  let nextPxX = xInput;
+  let nextPxY = yInput;
+  if (activePixelsPerMm !== null && selectedContourPxBounds) {
+    nextPxX =
+      originMode === 'center' ? (selectedContourPxBounds.minX + selectedContourPxBounds.maxX) * 0.5 + xInput * activePixelsPerMm
+        : selectedContourPxBounds.minX + xInput * activePixelsPerMm;
+    nextPxY =
+      originMode === 'center' ? (selectedContourPxBounds.minY + selectedContourPxBounds.maxY) * 0.5 - yInput * activePixelsPerMm
+        : selectedContourPxBounds.maxY - yInput * activePixelsPerMm;
+  }
+  const updatedContours = activeContours.map((c, idx) => {
+    if (idx !== selectedContourIdx) return c;
+    const nextPts = c.points.map((pt, vIdx) => vIdx === selectedVertexIdx ? { x: nextPxX, y: nextPxY } : pt);
+    return { ...c, points: nextPts };
+  });
+  setDraftContours(updatedContours);
+  setExtrudedPart(null);
+  notify(`Updated vertex #${selectedVertexIdx + 1}.`);
+};
+const handleDeleteSelectedVertex = (): void => {
+  if (selectedVertexIdx === null || !selectedContour || !activeContours) return;
+  if (selectedContour.points.length <= 3) {
+    notify('Cannot delete vertex: a closed contour requires at least 3 vertices.');
+    return;
+  }
+  const updatedContours = activeContours.map((c, idx) => {
+    if (idx !== selectedContourIdx) return c;
+    return {
+      ...c,
+      points: c.points.filter((_, vIdx) => vIdx !== selectedVertexIdx),
+    };
+  });
+  setDraftContours(updatedContours);
+  setSelectedVertexIdx(null);
+  setExtrudedPart(null);
+};
+const handleExtrude = (): void => {
+  if (!selectedContour) {
+    notify('Trace a valid outer contour before extruding.');
+    return;
+  }
+  if (activePixelsPerMm === null) {
+    notify('Reference scale (pixels -> mm) is required from Ray before extruding.');
+    return;
+  }
+  if (parsedExtrudeDepthMm === null) {
+    notify('Extrude depth (mm) is required from Ray before extruding.');
+    return;
+  }
+  const cad = transformPointsToCadMm(selectedContour, activePixelsPerMm, originMode);
+  // Pre-compute triangle count via temporary Shape/ExtrudeGeometry to report exact mesh stats.
+  const testShape = new THREE.Shape();
+  const first = cad.outerMm[0];
+  if (!first || cad.outerMm.length < 3) {
+    notify('Selected contour is degenerate (< 3 vertices).');
+    return;
+  }
+  testShape.moveTo(first.x, first.y);
+  for (let i = 1; i < cad.outerMm.length; i++) {
+    const pt = cad.outerMm[i];
+    if (pt) testShape.lineTo(pt.x, pt.y);
+  }
+  testShape.closePath();
+  for (let h = 0; h < cad.holesMm.length; h++) {
+    const hole = cad.holesMm[h];
+    if (!hole || hole.length < 3 || !hole[0]) continue;
+    const holePath = new THREE.Path();
+    holePath.moveTo(hole[0].x, hole[0].y);
+    for (let i = 1; i < hole.length; i++) {
+      const pt = hole[i];
+      if (pt) holePath.lineTo(pt.x, pt.y);
+    }
+    holePath.closePath();
+    testShape.holes.push(holePath);
+  }
+  const tempGeo = new THREE.ExtrudeGeometry(testShape, {
+    depth: parsedExtrudeDepthMm,
+    bevelEnabled: false,
+    curveSegments: 1,
+  });
+  const triCount = tempGeo.index
+    ? Math.floor(tempGeo.index.count / 3)
+    : Math.floor((tempGeo.getAttribute('position')?.count ?? 0) / 3);
+  tempGeo.dispose();
+
+  setExtrudedPart({
+    outerMm: cad.outerMm,
+    holesMm: cad.holesMm,
+    depthMm: parsedExtrudeDepthMm,
+    widthMm: cad.widthMm,
+    heightMm: cad.heightMm,
+    triangleCount: triCount,
+    partName: resolvedTracedPartSlug,
+  });
+
+  notify(`Extruded "${resolvedTracedPartSlug}" (${cad.widthMm.toFixed(2)} x ${cad.heightMm.toFixed(2)} x ${parsedExtrudeDepthMm} mm, ${triCount} triangles).`);
+};
+const handleExportTracedStl = (): void => {
+  if (!extrudedGroupRef.current || !extrudedPart) {
+    notify('Extrude the 2D profile before exporting STL.');
+    return;
+  }
+  const filename = `${extrudedPart.partName}-extruded.stl`;
+  // Scale factor is 1 because the extruded Three.js mesh is already constructed in millimetres.
+  const tris = exportObject3DToSTL(extrudedGroupRef.current, filename, 1);
+  notify(`Exported binary/ASCII STL in mm (${filename}, ${tris} triangles).`);
+};
+const handleExportTracedDxf = (): void => {
+  if (!selectedContour || activePixelsPerMm === null) {
+    notify('Trace a profile and enter a valid pixel-to-mm scale before exporting DXF.');
+    return;
+  }
+  const cad = transformPointsToCadMm(selectedContour, activePixelsPerMm, originMode);
+  const lines: string[] = [
+    '0', 'SECTION', '2', 'HEADER', '9', '$ACADVER', '1', 'AC1009', '9', '$EXTMIN', '10', String(cad.minXMm), '20', String(cad.minYMm), '30', '0', '9', '$EXTMAX', '10', String(cad.maxXMm), '20', String(cad.maxYMm), '30', '0', '0', 'ENDSEC', '0', 'SECTION', '2', 'TABLES', '0', 'TABLE', '2', 'LAYER', '70', '2', '0', 'LAYER', '2', 'PROFILE_OUTER', '70', '0', '62', '5', '6', 'CONTINUOUS', '0', 'LAYER', '2', 'PROFILE_HOLES', '70', '0', '62', '2', '6', 'CONTINUOUS', '0', 'ENDTAB', '0', 'ENDSEC', '0', 'SECTION', '2', 'ENTITIES',
+  ];
+  const appendClosedPolyline = (pts: VectorPoint[], layer: string): void => {
+    if (pts.length < 3) return;
+    lines.push('0', 'POLYLINE', '8', layer, '66', '1', '70', '1', '10', '0', '20', '0', '30', '0');
+    for (let i = 0; i < pts.length; i++) {
+      const pt = pts[i];
+      if (!pt) continue;
+      lines.push('0', 'VERTEX', '8', layer, '10', String(pt.x), '20', String(pt.y), '30', '0');
+    }
+    lines.push('0', 'SEQEND', '8', layer);
+  };
+
+  appendClosedPolyline(cad.outerMm, 'PROFILE_OUTER');
+  for (let h = 0; h < cad.holesMm.length; h++) {
+    const hole = cad.holesMm[h];
+    if (hole) appendClosedPolyline(hole, 'PROFILE_HOLES');
+  }
+
+  lines.push('0', 'ENDSEC', '0', 'EOF');
+  const filename = `${resolvedTracedPartSlug}-profile.dxf`;
+  const blob = new Blob([lines.join('\n')], { type: 'application/dxf;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  notify(`Exported AutoCAD R12 DXF profile in mm (${filename}).`);
+};
+const handleExportTracedSvg = (): void => {
+  if (!selectedContour || activePixelsPerMm === null) {
+    notify('Trace a profile and enter a valid pixel-to-mm scale before exporting SVG.');
+    return;
+  }
+  const cad = transformPointsToCadMm(selectedContour, activePixelsPerMm, originMode);
+  const buildRingPath = (pts: VectorPoint[]): string => {
+    if (pts.length === 0) return '';
+    const commands: string[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const pt = pts[i];
+      if (!pt) continue;
+      // Flip CAD Y back to top-down SVG Y inside the exact mm viewBox.
+      const svgX = pt.x;
+      const svgY = cad.maxYMm - pt.y + cad.minYMm;
+      commands.push(`${i === 0 ? 'M' : 'L'} ${svgX} ${svgY}`);
+    }
+    commands.push('Z');
+    return commands.join(' ');
+  };
+  const dParts: string[] = [buildRingPath(cad.outerMm)];
+  for (let h = 0; h < cad.holesMm.length; h++) {
+    const hole = cad.holesMm[h];
+    if (hole && hole.length >= 3) {
+      dParts.push(buildRingPath(hole));
+    }
+  }
+  const svgContent = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${cad.widthMm} mm" height="${cad.heightMm} mm" viewBox="${cad.minXMm} ${cad.minYMm} ${cad.widthMm} ${cad.heightMm}">`,
+    `  <title>${resolvedTracedPartSlug} (${cad.widthMm} mm x ${cad.heightMm} mm)</title>`,
+    `  <path d="${dParts.join(' ')}" fill="none" stroke="#000000" stroke-width="0.2" fill-rule="evenodd" />`,
+    '</svg>',
+  ].join('\n');
+  const filename = `${resolvedTracedPartSlug}-profile.svg`;
+  const blob = new Blob([svgContent], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  notify(`Exported 2D vector SVG in mm (${filename}).`);
+};
 
   return (
     <div className="p-4 sm:p-5 space-y-4 max-w-[1680px] mx-auto select-none">
@@ -1730,6 +2458,577 @@ export const TabDesignStudio: React.FC<TabDesignStudioProps> = ({
           </div>
         </div>
       )}
+
+{/* === IMAGE TO 3D PROFILE VECTORIZER & EXTRUDER === */}
+<section className="mt-6 rounded-xl border border-slate-700 bg-slate-900/90 p-5 text-slate-100 shadow-xl">
+  <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+    <div>
+      <h3 className="flex items-center gap-2 text-base font-semibold text-cyan-300">
+        <Layers className="h-4 w-4" /> Image to 3D Profile Pipeline (PNG / JPG → Traced Vector → 2D Draft → Extruded 3D → Export)
+      </h3>
+      <p className="mt-0.5 text-xs text-slate-400">
+        Client-side Otsu + Marching Squares + RDP. Ray's numbers only: missing scale, depth, material, and tolerance are never guessed.
+      </p>
+    </div>
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <span className="rounded border border-slate-700 bg-slate-950 px-2.5 py-1 text-slate-300">
+        Material: <strong className="text-amber-300">to be decided</strong>
+      </span>
+      <span className="rounded border border-slate-700 bg-slate-950 px-2.5 py-1 text-slate-300">
+        Tolerance: <strong className="text-amber-300">to be decided</strong>
+      </span>
+    </div>
+  </div>
+  <div className="grid grid-cols-1 gap-5 xl:grid-cols-12">
+    {/* LEFT COLUMN: 1. Intake + 2. Trace Controls + 3. Scale & Depth Inputs */}
+    <div className="space-y-4 xl:col-span-4">
+      {/* Step 1: Image Intake */}
+      <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3.5">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-300">
+            1. Image Intake (Single PNG / JPG)
+          </span>
+          {imageFile && (
+            <span className="text-[11px] text-cyan-300">{imageFile.name}</span>
+          )}
+        </div>
+        <input
+          type="file"
+          accept="image/png,image/jpeg,.png,.jpg,.jpeg"
+          onChange={handleImageUpload}
+          className="block w-full cursor-pointer rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-200 file:mr-3 file:rounded file:border-0 file:bg-cyan-600 file:px-2.5 file:py-1 file:text-xs file:font-semibold file:text-white hover:file:bg-cyan-500"
+        />
+        <label className="mt-2.5 block text-xs text-slate-300">
+          Part Name (used in exported filenames)
+          <input
+            type="text"
+            value={tracedPartName}
+            onChange={(e) => setTracedPartName(e.target.value)}
+            placeholder={`e.g. ${drawingNumber}-BRACKET`}
+            className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+          />
+        </label>
+      </div>
+      {/* Step 2: Trace / Vectorize Controls */}
+      <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3.5">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-300">
+            <Sliders className="h-3.5 w-3.5 text-cyan-400" /> 2. Trace &amp; Simplify
+          </span>
+          <span className="text-[11px] text-slate-400">
+            Threshold used:{' '}
+            <strong className="text-cyan-300">
+              {traceResult ? `${traceResult.thresholdUsed}${thresholdOverrideInput.trim() === '' ? ' (Otsu)' : ' (Manual)'}` : '—'}
+            </strong>
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-2.5">
+          <label className="block text-xs text-slate-300">
+            Threshold Override (0–255)
+            <input
+              type="number"
+              min={0}
+              max={255}
+              step={1}
+              value={thresholdOverrideInput}
+              onChange={(e) => setThresholdOverrideInput(e.target.value)}
+              placeholder="Blank = Otsu Auto"
+              className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100 placeholder:text-slate-500"
+            />
+          </label>
+          <label className="block text-xs text-slate-300">
+            RDP Epsilon (px)
+            <input
+              type="number"
+              min={0}
+              step={0.1}
+              value={rdpEpsilonInput}
+              onChange={(e) => setRdpEpsilonInput(e.target.value)}
+              className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100"
+            />
+          </label>
+        </div>
+        <label className="mt-2.5 block text-xs text-slate-300">
+          Minimum Contour Area Filter (px²)
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={minContourAreaInput}
+            onChange={(e) => setMinContourAreaInput(e.target.value)}
+            className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100"
+          />
+        </label>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={!imageFile || isTracing}
+            onClick={() => void handleTrace(false)}
+            className="rounded bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {isTracing ? 'Tracing...' : 'Re-trace'}
+          </button>
+          <button
+            type="button"
+            disabled={!imageFile || isTracing}
+            onClick={() => void handleTrace(true)}
+            className="rounded border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Reset to Otsu Auto
+          </button>
+          {traceResult && (
+            <button
+              type="button"
+              onClick={() => {
+                setDraftContours(
+                  traceResult.contours.map((c) => ({
+                    points: c.points.map((p) => ({ x: p.x, y: p.y })),
+                    holes: c.holes.map((h) => h.map((p) => ({ x: p.x, y: p.y }))),
+                  }))
+                );
+                setSelectedVertexIdx(null);
+                setExtrudedPart(null);
+              }}
+              className="rounded border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
+            >
+              Reset 2D Draft
+            </button>
+          )}
+        </div>
+        {activeContours && activeContours.length > 0 && (
+          <div className="mt-3 border-t border-slate-800 pt-2.5">
+            <label className="block text-xs text-slate-300">
+              Active Outer Contour ({activeContours.length} found)
+              <select
+                value={selectedContourIdx}
+                onChange={(e) => {
+                  setSelectedContourIdx(Number(e.target.value));
+                  setSelectedVertexIdx(null);
+                  setExtrudedPart(null);
+                }}
+                className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100"
+              >
+                {activeContours.map((c, idx) => (
+                  <option key={idx} value={idx}>
+                    Contour #{idx + 1} — {c.points.length} vertices, {c.holes.length} hole(s)
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+        {traceError && (
+          <div className="mt-3 rounded border border-red-500/50 bg-red-950/60 p-2.5 text-xs text-red-200">
+            {traceError}
+          </div>
+        )}
+      </div>
+      {/* Step 3: Required Reference Scale (pixels -> mm) & Extrude Depth */}
+      <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3.5">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-300">
+            3. Real-World Scale &amp; Depth (Required)
+          </span>
+        </div>
+        <div className="mb-2.5 flex gap-2 text-xs">
+          <button
+            type="button"
+            onClick={() => setScaleInputMode('reference_span')}
+            className={`rounded px-2.5 py-1 font-medium ${
+              scaleInputMode === 'reference_span'
+                ? 'bg-cyan-600 text-white'
+                : 'border border-slate-700 bg-slate-900 text-slate-300'
+            }`}
+          >
+            Reference Span (px → mm)
+          </button>
+          <button
+            type="button"
+            onClick={() => setScaleInputMode('direct_px_per_mm')}
+            className={`rounded px-2.5 py-1 font-medium ${
+              scaleInputMode === 'direct_px_per_mm'
+                ? 'bg-cyan-600 text-white'
+                : 'border border-slate-700 bg-slate-900 text-slate-300'
+            }`}
+          >
+            Direct px / mm
+          </button>
+        </div>
+        {scaleInputMode === 'reference_span' ? (
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block text-xs text-slate-300">
+                Reference Span (px) *
+                <input
+                  type="number"
+                  min={0}
+                  step="any"
+                  required
+                  value={refSpanPxInput}
+                  onChange={(e) => {
+                    setRefSpanPxInput(e.target.value);
+                    setExtrudedPart(null);
+                  }}
+                  placeholder="Required (px)"
+                  className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100 placeholder:text-slate-500"
+                />
+              </label>
+              <label className="block text-xs text-slate-300">
+                Real Length (mm) *
+                <input
+                  type="number"
+                  min={0}
+                  step="any"
+                  required
+                  value={refSpanMmInput}
+                  onChange={(e) => {
+                    setRefSpanMmInput(e.target.value);
+                    setExtrudedPart(null);
+                  }}
+                  placeholder="Required (mm)"
+                  className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100 placeholder:text-slate-500"
+                />
+              </label>
+            </div>
+            {selectedContourPxBounds && (
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRefSpanPxInput(String(selectedContourPxBounds.widthPx));
+                    setExtrudedPart(null);
+                  }}
+                  className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-cyan-300 hover:bg-slate-800"
+                >
+                  Use Contour Width ({selectedContourPxBounds.widthPx.toFixed(2)} px)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRefSpanPxInput(String(selectedContourPxBounds.heightPx));
+                    setExtrudedPart(null);
+                  }}
+                  className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-cyan-300 hover:bg-slate-800"
+                >
+                  Use Contour Height ({selectedContourPxBounds.heightPx.toFixed(2)} px)
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <label className="block text-xs text-slate-300">
+            Scale Factor (pixels per mm) *
+            <input
+              type="number"
+              min={0}
+              step="any"
+              required
+              value={directPxPerMmInput}
+              onChange={(e) => {
+                setDirectPxPerMmInput(e.target.value);
+                setExtrudedPart(null);
+              }}
+              placeholder="Required (px/mm)"
+              className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100 placeholder:text-slate-500"
+            />
+          </label>
+        )}
+        <div className="mt-2.5 rounded border border-slate-800 bg-slate-900/70 px-2.5 py-2 text-xs">
+          <div>
+            Scale:{' '}
+            {activePixelsPerMm !== null ? (
+              <strong className="text-emerald-300">{activePixelsPerMm.toFixed(4)} px/mm</strong>
+            ) : (
+              <strong className="text-amber-300">to be decided (reference dimension required)</strong>
+            )}
+          </div>
+          <div className="mt-1">
+            2D Envelope:{' '}
+            {scaledPreviewMetrics ? (
+              <strong className="text-cyan-300">
+                {scaledPreviewMetrics.widthMm.toFixed(3)} mm ×{' '}
+                {scaledPreviewMetrics.heightMm.toFixed(3)} mm
+              </strong>
+            ) : (
+              <strong className="text-amber-300">to be decided</strong>
+            )}
+          </div>
+        </div>
+        <label className="mt-2.5 block text-xs text-slate-300">
+          Coordinate Frame Origin
+          <select
+            value={originMode}
+            onChange={(e) => {
+              setOriginMode(e.target.value as 'bottom_left' | 'center');
+              setExtrudedPart(null);
+            }}
+            className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100"
+          >
+            <option value="bottom_left">Bottom-Left (0, 0)</option>
+            <option value="center">Part Center (0, 0)</option>
+          </select>
+        </label>
+        <label className="mt-2.5 block text-xs text-slate-300">
+          Extrude Depth (mm) * — No Default
+          <input
+            type="number"
+            min={0}
+            step="any"
+            required
+            value={extrudeDepthMmInput}
+            onChange={(e) => setExtrudeDepthMmInput(e.target.value)}
+            placeholder="Required from Ray (mm)"
+            className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+          />
+        </label>
+        {parsedExtrudeDepthMm === null && (
+          <p className="mt-1 text-[11px] text-amber-300">
+            Extrude depth: to be decided (Extrude disabled until entered).
+          </p>
+        )}
+        <button
+          type="button"
+          disabled={!selectedContour || activePixelsPerMm === null || parsedExtrudeDepthMm === null}
+          onClick={handleExtrude}
+          className="mt-3 flex w-full items-center justify-center gap-2 rounded bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Box className="h-4 w-4" /> Extrude 2D Profile to 3D
+        </button>
+      </div>
+    </div>
+    {/* CENTER COLUMN: Source Image + Traced Overlay + 2D Draft Editing */}
+    <div className="space-y-3 xl:col-span-4">
+      <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3.5">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-300">
+            Source Image &amp; Traced 2D Overlay
+          </span>
+          <div className="flex gap-1 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setOverlayTool('inspect')}
+              className={`rounded px-2 py-0.5 ${
+                overlayTool === 'inspect'
+                  ? 'bg-cyan-600 text-white'
+                  : 'border border-slate-700 bg-slate-900 text-slate-300'
+              }`}
+            >
+              Inspect
+            </button>
+            <button
+              type="button"
+              onClick={() => setOverlayTool('caliper')}
+              className={`rounded px-2 py-0.5 ${
+                overlayTool === 'caliper'
+                  ? 'bg-emerald-600 text-white'
+                  : 'border border-slate-700 bg-slate-900 text-slate-300'
+              }`}
+            >
+              2-Pt Caliper
+            </button>
+            <button
+              type="button"
+              onClick={() => setOverlayTool('edit_vertices')}
+              className={`rounded px-2 py-0.5 ${
+                overlayTool === 'edit_vertices'
+                  ? 'bg-amber-600 text-white'
+                  : 'border border-slate-700 bg-slate-900 text-slate-300'
+              }`}
+            >
+              Edit Vertices
+            </button>
+          </div>
+        </div>
+        {imagePreviewUrl ? (
+          <div className="relative overflow-hidden rounded border border-slate-700 bg-slate-950">
+            <img src={imagePreviewUrl} alt="Uploaded part drawing" className="block h-auto w-full select-none" />
+            {traceResult && (
+              <svg
+                ref={overlaySvgRef}
+                viewBox={`0 0 ${traceResult.width} ${traceResult.height}`}
+                preserveAspectRatio="none"
+                onClick={handleOverlaySvgClick}
+                className={`absolute inset-0 h-full w-full ${
+                  overlayTool === 'inspect' ? 'cursor-default' : 'cursor-crosshair'
+                }`}
+              >
+                {activeContours?.map((contour, cIdx) => {
+                  const isSelected = cIdx === selectedContourIdx;
+                  const outerPointsStr = contour.points.map((p) => `${p.x},${p.y}`).join(' ');
+                  const strokeScale = Math.max(traceResult.width, traceResult.height) / 360;
+                  return (
+                    <g key={cIdx}>
+                      <polygon
+                        points={outerPointsStr}
+                        fill={isSelected ? 'rgba(34, 211, 238, 0.16)' : 'none'}
+                        stroke={isSelected ? '#22d3ee' : '#38bdf8'}
+                        strokeOpacity={isSelected ? 0.95 : 0.45}
+                        strokeWidth={isSelected ? 2.2 * strokeScale : 1.2 * strokeScale}
+                        strokeDasharray={isSelected ? undefined : `${4 * strokeScale} ${3 * strokeScale}`}
+                      />
+                      {contour.holes.map((hole, hIdx) => (
+                        <polygon
+                          key={hIdx}
+                          points={hole.map((p) => `${p.x},${p.y}`).join(' ')}
+                          fill={isSelected ? 'rgba(245, 158, 11, 0.18)' : 'none'}
+                          stroke="#f59e0b"
+                          strokeOpacity={isSelected ? 0.95 : 0.5}
+                          strokeWidth={1.8 * strokeScale}
+                        />
+                      ))}
+                      {isSelected &&
+                        contour.points.length <= 400 &&
+                        contour.points.map((pt, vIdx) => (
+                          <circle
+                            key={vIdx}
+                            cx={pt.x}
+                            cy={pt.y}
+                            r={selectedVertexIdx === vIdx ? 4.2 * strokeScale : 2.3 * strokeScale}
+                            fill={selectedVertexIdx === vIdx ? '#fde047' : '#22d3ee'}
+                            stroke="#0f172a"
+                            strokeWidth={0.8 * strokeScale}
+                            onClick={(ev) => {
+                              if (overlayTool !== 'edit_vertices') return;
+                              ev.stopPropagation();
+                              setSelectedVertexIdx(vIdx);
+                            }}
+                          />
+                        ))}
+                    </g>
+                  );
+                })}
+                {caliperPoints.length === 2 && caliperPoints[0] && caliperPoints[1] && (
+                  <g>
+                    <line
+                      x1={caliperPoints[0].x}
+                      y1={caliperPoints[0].y}
+                      x2={caliperPoints[1].x}
+                      y2={caliperPoints[1].y}
+                      stroke="#4ade80"
+                      strokeWidth={2 * (Math.max(traceResult.width, traceResult.height) / 360)}
+                    />
+                    <circle cx={caliperPoints[0].x} cy={caliperPoints[0].y} r={3.2 * (Math.max(traceResult.width, traceResult.height) / 360)} fill="#4ade80" />
+                    <circle cx={caliperPoints[1].x} cy={caliperPoints[1].y} r={3.2 * (Math.max(traceResult.width, traceResult.height) / 360)} fill="#4ade80" />
+                  </g>
+                )}
+              </svg>
+            )}
+          </div>
+        ) : (
+          <div className="flex h-64 items-center justify-center rounded border border-dashed border-slate-700 bg-slate-900/40 text-xs text-slate-500">
+            Upload a PNG or JPG drawing to preview the traced outline over the source image.
+          </div>
+        )}
+        {traceResult && (
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+            <span>
+              Image: {traceResult.width} × {traceResult.height} px
+            </span>
+            <span>Cyan = outer contour · Amber = holes</span>
+          </div>
+        )}
+        {overlayTool === 'edit_vertices' && selectedContour && (
+          <div className="mt-3 rounded border border-slate-800 bg-slate-900/70 p-2.5 text-xs">
+            <div className="mb-1.5 font-medium text-amber-300">
+              2D Vertex Draft Editor ({selectedContour.points.length} vertices)
+            </div>
+            {selectedVertexIdx !== null ? (
+              <div className="space-y-2">
+                <div className="text-[11px] text-slate-400">
+                  Selected Vertex #{selectedVertexIdx + 1} (
+                  {activePixelsPerMm !== null ? 'mm in coordinate frame' : 'px'}). Click canvas to insert a new vertex after it.
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="number"
+                    step="any"
+                    value={vertexEditXInput}
+                    onChange={(e) => setVertexEditXInput(e.target.value)}
+                    placeholder="X"
+                    className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100"
+                  />
+                  <input
+                    type="number"
+                    step="any"
+                    value={vertexEditYInput}
+                    onChange={(e) => setVertexEditYInput(e.target.value)}
+                    placeholder="Y"
+                    className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <button type="button" onClick={handleApplyVertexEdit} className="rounded bg-amber-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-amber-500">
+                    Apply Vertex Coords
+                  </button>
+                  <button type="button" onClick={handleDeleteSelectedVertex} className="flex items-center gap-1 rounded border border-red-700/60 bg-red-950/60 px-2.5 py-1 text-xs text-red-200 hover:bg-red-900/60">
+                    <Trash2 className="h-3 w-3" /> Delete
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="text-[11px] text-slate-400">
+                Click any vertex dot on the cyan outer contour to edit coordinates, insert a vertex, or delete it.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+    {/* RIGHT COLUMN: 4. 3D Extruded Preview + 5. CAD / CAM Exports */}
+    <div className="space-y-4 xl:col-span-4">
+      <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3.5">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-300">
+            <Box className="h-3.5 w-3.5 text-emerald-400" /> 4. 3D Extruded Preview (Local Three.js)
+          </span>
+          {extrudedPart && (
+            <span className="text-[11px] text-emerald-300">
+              {extrudedPart.triangleCount} tris · Z={extrudedPart.depthMm} mm
+            </span>
+          )}
+        </div>
+        <div ref={extrudePreviewMountRef} className="h-72 w-full overflow-hidden rounded border border-slate-700 bg-slate-950">
+          {!extrudedPart && (
+            <div className="flex h-full items-center justify-center px-4 text-center text-xs text-slate-500">
+              Enter reference scale (px → mm) and extrude depth (mm), then click &ldquo;Extrude 2D Profile to 3D&rdquo;.
+            </div>
+          )}
+        </div>
+        {extrudedPart && (
+          <p className="mt-1.5 text-[11px] text-slate-400">
+            Drag to orbit · Scroll to zoom · Size:{' '}
+            {extrudedPart.widthMm.toFixed(2)} × {extrudedPart.heightMm.toFixed(2)} ×{' '}
+            {extrudedPart.depthMm} mm
+          </p>
+        )}
+      </div>
+      {/* Step 5: Exports */}
+      <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3.5">
+        <div className="mb-2.5 text-xs font-semibold uppercase tracking-wide text-slate-300">
+          5. Export Traced Part (mm)
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <button type="button" disabled={!extrudedPart} onClick={handleExportTracedStl} className="flex items-center justify-center gap-1.5 rounded bg-cyan-600 px-3 py-2 text-xs font-semibold text-white hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-40">
+            <Download className="h-3.5 w-3.5" /> Export STL (3D)
+          </button>
+          <button type="button" disabled={!selectedContour || activePixelsPerMm === null} onClick={handleExportTracedDxf} className="flex items-center justify-center gap-1.5 rounded border border-cyan-600/60 bg-slate-900 px-3 py-2 text-xs font-semibold text-cyan-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40">
+            <FileCode2 className="h-3.5 w-3.5" /> Export DXF (2D)
+          </button>
+          <button type="button" disabled={!selectedContour || activePixelsPerMm === null} onClick={handleExportTracedSvg} className="flex items-center justify-center gap-1.5 rounded border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40">
+            <Download className="h-3.5 w-3.5" /> Export SVG (2D)
+          </button>
+          <button type="button" disabled title="Disabled until tool, feed, speed, depth, and units are supplied by Ray." className="flex cursor-not-allowed items-center justify-center gap-1.5 rounded border border-slate-700 bg-slate-900/50 px-3 py-2 text-xs font-semibold text-slate-500 opacity-55">
+            <Wrench className="h-3.5 w-3.5" /> RS-274.NC (Locked)
+          </button>
+        </div>
+        <p className="mt-2.5 rounded border border-amber-500/30 bg-amber-950/30 p-2 text-[11px] text-amber-200">
+          <strong>RS-274.NC disabled: </strong>
+          tool diameter, feed rate, spindle speed, cut depth, and units are required from Ray before CNC G-code can be generated (never guessed).
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
 
       {/* ===================================================================== */}
       {/* SUB-PAGE 4: CINEMATIC RENDER LAB & REALISTIC STUDIO IMAGERY           */}
